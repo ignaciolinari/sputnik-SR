@@ -1,0 +1,7 @@
+# macOS
+.DS_Store
+
+# node / python / etc ejemplos
+node_modules/
+dist/
+.env
