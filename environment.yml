@@ -1,0 +1,16 @@
+name: sputnik-sr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - ipykernel
+  - flask
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - seaborn
+  - pip:
+      - polars
+      - pre-commit
