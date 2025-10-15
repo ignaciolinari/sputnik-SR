@@ -2,6 +2,12 @@
 node_modules/
 dist/
 .env
+.venv/
 .conda/
+__pycache__/
+*.py[cod]
+.pytest_cache/
 *.db
-backup/
+data/backup/
+logs/
+.ruff_cache/

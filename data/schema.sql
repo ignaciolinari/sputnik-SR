@@ -5,6 +5,7 @@ PRAGMA foreign_keys = ON;
 ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
     id_user           TEXT PRIMARY KEY,
+    role              TEXT,
     join_date         TEXT,
     last_active       TEXT,
     objectivity_score NUMERIC CHECK (objectivity_score BETWEEN 0 AND 100),
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS releases (
 CREATE TABLE IF NOT EXISTS interactions (
     id_release    INTEGER NOT NULL REFERENCES releases(id_release) ON UPDATE CASCADE ON DELETE CASCADE,
     id_user       TEXT    NOT NULL REFERENCES users(id_user)      ON UPDATE CASCADE ON DELETE CASCADE,
-    rating        NUMERIC NOT NULL CHECK (rating IN (0,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5)),
+    rating        NUMERIC NOT NULL CHECK (rating >= 0 AND rating <= 5),
     rating_date   TEXT,
     soundoff_text TEXT,
     source_url    TEXT,
@@ -196,3 +197,12 @@ CREATE INDEX IF NOT EXISTS idx_interactions_rating_date ON interactions(rating_d
 CREATE INDEX IF NOT EXISTS idx_release_genres_genre     ON release_genres(id_genre);
 CREATE INDEX IF NOT EXISTS idx_list_releases_release    ON list_releases(id_release);
 CREATE INDEX IF NOT EXISTS idx_staff_reviews_release    ON staff_reviews(id_release);
+
+-- Performance indexes for frequently queried columns
+CREATE INDEX IF NOT EXISTS idx_releases_artist_id ON releases(artist_id);
+CREATE INDEX IF NOT EXISTS idx_interactions_rating ON interactions(rating);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- Additional useful indexes
+CREATE INDEX IF NOT EXISTS idx_releases_release_year ON releases(release_year);
+CREATE INDEX IF NOT EXISTS idx_interactions_user_rating ON interactions(id_user, rating);

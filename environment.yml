@@ -11,6 +11,8 @@ dependencies:
   - scipy
   - scikit-learn
   - seaborn
-  - pip:
-      - polars
-      - pre-commit
+  - requests
+  - beautifulsoup4
+  - tqdm
+  - pre-commit
+  - pytest
