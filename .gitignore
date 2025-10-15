@@ -7,7 +7,7 @@ dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-*.db
+*.db*
 data/backup/
 logs/
 .ruff_cache/

@@ -92,7 +92,7 @@ Para reanudar un crawl interrumpido alcanza con relanzar el comando; los años c
 - El script `scripts/monitor_crawler.sh` muestra un panel con proceso, tail del log y contadores básicos. Ejemplo:
 
 	```bash
-	bash scripts/monitor_crawler.sh --db data/sputnik.db --log logs/crawler-full.log
+	bash scripts/monitor_crawler.sh
 	```
 
 - Los logs detallados quedan en `logs/crawler-full.log` (o el archivo que definas). Para ejecuciones largas se recomienda redirigir la salida estándar a un log con `> archivo.log 2>&1 &`.
