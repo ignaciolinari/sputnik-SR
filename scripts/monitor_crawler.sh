@@ -39,8 +39,9 @@ show_menu() {
   echo "1) Ver log del crawler"
   echo "2) Ver progreso de carga de datos"
   echo "3) Ver estadísticas de la base de datos"
-  echo "4) Ver todo (modo automático)"
-  echo "5) Salir"
+  echo "4) Ver estado de colas de expansión"
+  echo "5) Ver todo (modo automático)"
+  echo "6) Salir"
   echo
 }
 
@@ -162,12 +163,76 @@ SQL
 # Función para mostrar procesos activos
 show_processes() {
   echo "Procesos activos del crawler:"
-  if ! pgrep -fl "python -m crawler" >/dev/null 2>&1; then
+  if ! pgrep -fl "python -m crawler" >/dev/null 2>&1 && \
+     ! pgrep -fl "python -m crawler.user_expander" >/dev/null 2>&1 && \
+     ! pgrep -fl "python -m crawler.discography" >/dev/null 2>&1; then
     echo "  (ningún proceso del crawler detectado)"
   else
-    pgrep -fl "python -m crawler" | sed 's/^/  /'
+    pgrep -fl "python -m crawler" | sed 's/^/  /' || true
+    pgrep -fl "python -m crawler.user_expander" | sed 's/^/  /' || true
+    pgrep -fl "python -m crawler.discography" | sed 's/^/  /' || true
   fi
   echo
+}
+
+# Función para mostrar estado de colas de expansión
+show_queues() {
+  echo "=== Estado de Colas de Expansión ==="
+  echo "Estado de usuarios en cola:"
+  echo
+
+  if [[ -f "${DB_PATH}" ]]; then
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 10 12 10
+SELECT status as "Estado", priority as "Prioridad", COUNT(*) as "Cantidad"
+FROM crawl_users
+GROUP BY status, priority
+ORDER BY status, priority DESC;
+SQL
+
+    echo
+    echo "Estado de artistas en cola:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 12 10
+SELECT status as "Estado", COUNT(*) as "Cantidad"
+FROM crawl_artists
+GROUP BY status
+ORDER BY status;
+SQL
+
+    echo
+    echo "Estado de releases en cola:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 12 10
+SELECT status as "Estado", COUNT(*) as "Cantidad"
+FROM crawl_releases
+GROUP BY status
+ORDER BY status;
+SQL
+
+    echo
+    echo "Resumen de colas:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Usuarios totales: ' || COUNT(*) FROM crawl_users;
+SELECT '  Artistas totales: ' || COUNT(*) FROM crawl_artists;
+SELECT '  Releases totales: ' || COUNT(*) FROM crawl_releases;
+SELECT '  Usuarios pendientes: ' || COUNT(*) FROM crawl_users WHERE status = 'pending';
+SELECT '  Artistas pendientes: ' || COUNT(*) FROM crawl_artists WHERE status = 'pending';
+SQL
+  else
+    echo "Base de datos no encontrada en ${DB_PATH}"
+  fi
+
+  echo
+  read -p "Presiona Enter para continuar..."
 }
 
 # Función para el modo automático (como el original)
@@ -192,6 +257,9 @@ SELECT '  releases=' || COUNT(*) FROM releases;
 SELECT '  users=' || COUNT(*) FROM users;
 SELECT '  interactions=' || COUNT(*) FROM interactions;
 SELECT '  release_tracks=' || COUNT(*) FROM release_tracks;
+SELECT '  crawl_users=' || COUNT(*) FROM crawl_users;
+SELECT '  crawl_artists=' || COUNT(*) FROM crawl_artists;
+SELECT '  crawl_releases=' || COUNT(*) FROM crawl_releases;
 SQL
     else
       echo "Database file not found at ${DB_PATH}"
@@ -206,7 +274,7 @@ SQL
 # Loop principal del menú
 while true; do
   show_menu
-  read -p "Elige una opción (1-5): " choice
+  read -p "Elige una opción (1-6): " choice
   echo
 
   case $choice in
@@ -220,9 +288,12 @@ while true; do
       show_stats
       ;;
     4)
-      auto_mode
+      show_queues
       ;;
     5)
+      auto_mode
+      ;;
+    6)
       echo "¡Hasta luego!"
       exit 0
       ;;

@@ -39,7 +39,10 @@ class CrawlConfig:
     dry_run: bool
     fetch_tracklists: bool
     fetch_soundoffs: bool
-    max_soundoffs: Optional[int]
+    max_soundoffs: Optional[int] = None
+    fetch_user_profiles: bool = True
+    queue_users: bool = True
+    user_queue_priority: int = 0
 
 
 def crawl_years(config: CrawlConfig) -> None:
@@ -53,6 +56,7 @@ def crawl_years(config: CrawlConfig) -> None:
         _configure_connection(connection)
         _ensure_schema(connection, config.schema_path)
         _ensure_progress_table(connection)
+        _ensure_work_queues(connection)
 
         if config.dry_run:
             LOGGER.warning("Running in dry-run mode. No database mutations will be committed.")
@@ -144,6 +148,40 @@ def _ensure_schema(connection: sqlite3.Connection, schema_path: Path) -> None:
     LOGGER.debug("Applying schema from %s", schema_path)
     schema_sql = schema_path.read_text(encoding="utf-8")
     connection.executescript(schema_sql)
+
+
+def _ensure_work_queues(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        INSERT INTO crawl_users (
+            id_user, status, priority, attempts, last_error,
+            last_crawled, updated_at
+        )
+        SELECT id_user, 'pending', 0, 0, NULL, NULL, datetime('now')
+        FROM users
+        WHERE id_user NOT IN (SELECT id_user FROM crawl_users)
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO crawl_releases (
+            id_release, status, attempts, last_error, last_crawled, updated_at
+        )
+        SELECT id_release, 'seeded', 0, NULL, NULL, datetime('now')
+        FROM releases
+        WHERE id_release NOT IN (SELECT id_release FROM crawl_releases)
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO crawl_artists (
+            id_artist, status, attempts, last_error, last_crawled, updated_at
+        )
+        SELECT id_artist, 'pending', 0, NULL, NULL, datetime('now')
+        FROM artists
+        WHERE id_artist NOT IN (SELECT id_artist FROM crawl_artists)
+        """
+    )
 
 
 def _parse_log_level(value: str) -> int:
@@ -240,7 +278,13 @@ def _enrich_release(
     if config.fetch_soundoffs:
         soundoffs = _safe_fetch_soundoffs(entry.album_id, client, limit=config.max_soundoffs)
         if soundoffs:
-            _persist_soundoffs(connection, soundoffs, client, processed_users)
+            _persist_soundoffs(
+                connection,
+                soundoffs,
+                client,
+                processed_users,
+                config=config,
+            )
             LOGGER.info("Stored %s soundoffs for album %s", len(soundoffs), entry.album_id)
             _update_progress(connection, year, note=f"soundoffs stored ({len(soundoffs)} ratings)")
         else:
@@ -294,6 +338,8 @@ def _persist_soundoffs(
     soundoffs: Sequence[SoundoffEntry],
     client: SputnikClient,
     processed_users: Set[str],
+    *,
+    config: CrawlConfig,
 ) -> None:
     LOGGER.debug("Persisting %s soundoffs for album %s", len(soundoffs), soundoffs[0].album_id)
     for soundoff in soundoffs:
@@ -305,20 +351,41 @@ def _persist_soundoffs(
             soundoff.user_role,
         )
 
-        if soundoff.user_id not in processed_users:
+        first_time_seen = soundoff.user_id not in processed_users
+        profile: Optional[UserProfile] = None
+
+        if first_time_seen and config.fetch_user_profiles:
             LOGGER.debug("Fetching user profile for %s", soundoff.user_id)
             profile = _safe_fetch_user_profile(soundoff.user_id, client)
             if profile:
                 if soundoff.user_role and not profile.role:
                     profile = replace(profile, role=soundoff.user_role)
                 _upsert_user(connection, profile, role_hint=soundoff.user_role)
-            elif soundoff.user_role:
-                _ensure_user_role_hint(connection, soundoff.user_id, soundoff.user_role)
+                if config.queue_users:
+                    _enqueue_user(
+                        connection,
+                        soundoff.user_id,
+                        priority=config.user_queue_priority,
+                        status="done",
+                    )
+            else:
+                _ensure_user_placeholder(connection, soundoff.user_id, soundoff.user_role)
+                if config.queue_users:
+                    _enqueue_user(
+                        connection,
+                        soundoff.user_id,
+                        priority=config.user_queue_priority,
+                    )
+        elif first_time_seen:
+            _ensure_user_placeholder(connection, soundoff.user_id, soundoff.user_role)
+            if config.queue_users:
+                _enqueue_user(connection, soundoff.user_id, priority=config.user_queue_priority)
 
+        if first_time_seen:
             processed_users.add(soundoff.user_id)
-        else:
-            if soundoff.user_role:
-                _ensure_user_role_hint(connection, soundoff.user_id, soundoff.user_role)
+
+        if soundoff.user_role:
+            _ensure_user_role_hint(connection, soundoff.user_id, soundoff.user_role)
 
         _upsert_interaction(connection, soundoff)
 
@@ -338,6 +405,45 @@ def _ensure_user_role_hint(
         WHERE id_user = ?
         """,
         (role, user_id),
+    )
+
+
+def _ensure_user_placeholder(
+    connection: sqlite3.Connection, user_id: str, role_hint: Optional[str]
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO users (id_user, role)
+        VALUES (?, ?)
+        ON CONFLICT(id_user) DO UPDATE SET
+            role = COALESCE(users.role, excluded.role)
+        """,
+        (user_id, role_hint),
+    )
+
+
+def _enqueue_user(
+    connection: sqlite3.Connection,
+    user_id: str,
+    *,
+    priority: int,
+    status: str = "pending",
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO crawl_users (
+            id_user, status, priority, attempts, last_error, last_crawled, updated_at
+        )
+        VALUES (?, ?, ?, 0, NULL, NULL, datetime('now'))
+        ON CONFLICT(id_user) DO UPDATE SET
+            status = CASE
+                WHEN crawl_users.status = 'done' THEN crawl_users.status
+                ELSE excluded.status
+            END,
+            priority = MAX(crawl_users.priority, excluded.priority),
+            updated_at = datetime('now')
+        """,
+        (user_id, status, priority),
     )
 
 
@@ -585,6 +691,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable user interaction fetching during the crawl",
     )
     parser.add_argument(
+        "--skip-user-profiles",
+        action="store_true",
+        help="Do not fetch user profiles while processing soundoffs (only enqueue)",
+    )
+    parser.add_argument(
+        "--no-queue-users",
+        action="store_true",
+        help="Avoid enqueuing users discovered in soundoffs",
+    )
+    parser.add_argument(
+        "--user-queue-priority",
+        type=int,
+        default=0,
+        help="Priority assigned to users enqueued from soundoffs (default: 0)",
+    )
+    parser.add_argument(
         "--max-soundoffs",
         type=int,
         help="Optional cap on soundoffs processed per album (useful for smoke tests)",
@@ -620,6 +742,9 @@ def main(argv: Iterable[str] | None = None) -> None:
         dry_run=args.dry_run,
         fetch_tracklists=not args.skip_tracklists,
         fetch_soundoffs=not args.skip_soundoffs,
+        fetch_user_profiles=not args.skip_user_profiles,
+        queue_users=not args.no_queue_users,
+        user_queue_priority=args.user_queue_priority,
         max_soundoffs=args.max_soundoffs,
     )
     crawl_years(config)

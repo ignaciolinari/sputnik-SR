@@ -2,7 +2,17 @@
 
 Proyecto para construir un sistema de recomendación de discos a partir de datos obtenidos en Sputnikmusic.
 
+## Propósito y Responsabilidad
+
+**Este proyecto es exclusivamente educativo.**
+
+- **Fin académico**: Desarrollado para aprender sobre web scraping, procesamiento de datos y sistemas de recomendación.
+- **Respeto a la plataforma**: Implementa rate limiting, delays entre requests y scraping ético para no sobrecargar Sputnikmusic.
+- **Uso responsable**: Los datos obtenidos son solo para análisis personal y no se redistribuyen.
+- **Cumplimiento**: Respeta los términos de servicio del sitio y evita cualquier impacto negativo en su funcionamiento.
+
 ## Tabla de contenidos
+- [Propósito y Responsabilidad](#️-propósito-y-responsabilidad)
 - [Entorno de desarrollo](#entorno-de-desarrollo)
 - [Base de datos](#base-de-datos)
 - [Scraper CLI](#scraper-cli)
@@ -81,54 +91,55 @@ Características:
 
 Para reanudar un crawl interrumpido alcanza con relanzar el comando; los años completados quedan marcados como `DONE` en `crawl_state`.
 
-## Monitoreo y seguimiento
+### Flujo escalonado de ingestión
 
-- Consultá el progreso persistido:
+Para poblar la base más rápido y profundizar después, podés separar la ingesta en tres etapas:
 
-	```bash
-	sqlite3 data/sputnik.db "SELECT year, status, last_note, updated_at FROM crawl_state ORDER BY year" | tail
-	```
+1. **Semillas (charts + soundoffs)**
+   - Captura el top anual y, para cada álbum, ingiere las interacciones visibles en `soundoff.php`.
+   - Encola automáticamente a los usuarios detectados en `crawl_users` si se habilita el encolado.
+   - Podés ejecutar el comando directamente o usar el script `scripts/seed_charts.sh`:
 
-- El script `scripts/monitor_crawler.sh` muestra un panel con proceso, tail del log y contadores básicos. Ejemplo:
+        ```bash
+        python -m crawler \
+            --start-year 2000 \
+            --end-year 2024 \
+            --db data/sputnik.db \
+            --schema data/schema.sql \
+            --skip-tracklists \
+            --skip-user-profiles \
+            --user-queue-priority 5 \
+            --log-level INFO
+        ```
 
-	```bash
-	bash scripts/monitor_crawler.sh
-	```
+2. **Expansión de usuarios**
+   - Consume `crawl_users` y trae el resto de los ratings públicos de cada perfil.
+  - `crawler.user_expander` respeta claves únicas, actualiza perfiles y marca cada usuario como `done` o `error`.
+   - Script sugerido: `scripts/expand_users.sh`
 
-- Los logs detallados quedan en `logs/crawler-full.log` (o el archivo que definas). Para ejecuciones largas se recomienda redirigir la salida estándar a un log con `> archivo.log 2>&1 &`.
+        ```bash
+        python -m crawler.user_expander \
+            --db data/sputnik.db \
+            --schema data/schema.sql \
+            --batch-size 25 \
+            --max-rating-pages 10 \
+            --log-level INFO
+        ```
 
-## Estructura del repositorio
+3. **Discografías extendidas**
+   - Con los artistas ya en base (desde los charts), podés recorrerlos y sumar releases faltantes.
+   - El módulo `crawler.discography` trae la discografía pública, opcionalmente tracklists y soundoffs.
+   - Utilizar `scripts/expand_discographies.sh` o correr este ejemplo:
 
-- `app/`: aplicación web (placeholder).
-- `data/`: esquema SQL, base de datos y backups locales.
-- `examples/`: scripts de demostración del cliente.
-- `scraper/`: cliente HTTP, parsers de charts/soundoffs/tracklists/usuarios.
-- `crawler/`: orquestador de ingesta hacia SQLite.
-- `scripts/`: utilidades de monitoreo.
-- `tests/`: pruebas unitarias (`pytest`).
-- `environment.yml`: definición de entorno.
-- `pyproject.toml`: configuración de Ruff y pytest.
+        ```bash
+        python -m crawler.discography \
+            --db data/sputnik.db \
+            --schema data/schema.sql \
+            --batch-size 25 \
+            --max-soundoffs 100 \
+            --log-level INFO
+        ```
 
-## Pruebas
+Los scripts aceptan los mismos flags que los módulos correspondientes y permiten parametrizar año de inicio/fin, prioridades, límites de páginas, etc. Asimismo respetan las variables de entorno `DB_PATH` y `SCHEMA_PATH` por si necesitás apuntar a otra base.
 
-```bash
-pytest
-```
-
-La batería valida los parsers (charts, soundoffs, usuarios), la lógica del cliente HTTP (reintentos, rate limiting) y los loaders auxiliares.
-
-## Pre-commits
-
-1. Instalar los hooks (con el entorno activo):
-
-	```bash
-	pre-commit install
-	```
-
-2. Ejecutar sobre todo el repositorio cuando quieras verificar el estado actual:
-
-	```bash
-	pre-commit run --all-files
-	```
-
-Los hooks ejecutan `ruff`, `black`, `isort` y validaciones básicas de formato.
+> Recomendaciones: usar batches pequeños para controlar rate limiting, monitorear `crawl_users`/`crawl_releases`, y relanzar los comandos sin miedo a duplicados (las tablas usan `ON CONFLICT`

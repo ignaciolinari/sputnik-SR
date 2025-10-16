@@ -44,6 +44,61 @@ CREATE TABLE IF NOT EXISTS interactions (
     PRIMARY KEY (id_release, id_user)
 );
 
+CREATE TABLE IF NOT EXISTS crawl_users (
+    id_user     TEXT PRIMARY KEY REFERENCES users(id_user) ON DELETE CASCADE,
+    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','done','error')),
+    priority    INTEGER NOT NULL DEFAULT 0,
+    attempts    INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error  TEXT,
+    last_crawled TEXT,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS crawl_releases (
+    id_release   INTEGER PRIMARY KEY REFERENCES releases(id_release) ON DELETE CASCADE,
+    status       TEXT NOT NULL CHECK (status IN ('seeded','pending','processing','done','error')),
+    attempts     INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error   TEXT,
+    last_crawled TEXT,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS crawl_artists (
+    id_artist    INTEGER PRIMARY KEY REFERENCES artists(id_artist) ON DELETE CASCADE,
+    status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','done','error')),
+    attempts     INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    last_error   TEXT,
+    last_crawled TEXT,
+    updated_at   TEXT NOT NULL
+);
+
+------------------------------------------------------------
+-- Triggers to keep work queues in sync
+------------------------------------------------------------
+CREATE TRIGGER IF NOT EXISTS trg_users_enqueue
+AFTER INSERT ON users
+BEGIN
+    INSERT INTO crawl_users (id_user, status, priority, attempts, last_error, last_crawled, updated_at)
+    VALUES (NEW.id_user, 'pending', 0, 0, NULL, NULL, datetime('now'))
+    ON CONFLICT(id_user) DO UPDATE SET updated_at = datetime('now');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_releases_enqueue
+AFTER INSERT ON releases
+BEGIN
+    INSERT INTO crawl_releases (id_release, status, attempts, last_error, last_crawled, updated_at)
+    VALUES (NEW.id_release, 'seeded', 0, NULL, NULL, datetime('now'))
+    ON CONFLICT(id_release) DO NOTHING;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_artists_enqueue
+AFTER INSERT ON artists
+BEGIN
+    INSERT INTO crawl_artists (id_artist, status, attempts, last_error, last_crawled, updated_at)
+    VALUES (NEW.id_artist, 'pending', 0, NULL, NULL, datetime('now'))
+    ON CONFLICT(id_artist) DO UPDATE SET updated_at = datetime('now');
+END;
+
 ------------------------------------------------------------
 -- Auxiliares para features content-based
 ------------------------------------------------------------
