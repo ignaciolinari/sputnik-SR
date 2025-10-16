@@ -4,19 +4,21 @@ import argparse
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable
+from typing import List
+from typing import Optional
 
-from scraper import (
-    ArtistReleaseEntry,
-    SoundoffEntry,
-    SputnikClient,
-    TrackEntry,
-    fetch_artist_discography,
-    fetch_soundoffs,
-    fetch_tracklist,
-)
+from scraper import ArtistReleaseEntry
+from scraper import SoundoffEntry
+from scraper import SputnikClient
+from scraper import TrackEntry
+from scraper import fetch_artist_discography
+from scraper import fetch_soundoffs
+from scraper import fetch_tracklist
+
 
 LOGGER = logging.getLogger(__name__)
 

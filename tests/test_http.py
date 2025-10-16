@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import types
 from collections import deque
-from typing import Any, Deque, Iterable, List, Mapping, Optional, Tuple
+from typing import Any
+from typing import Deque
+from typing import Iterable
+from typing import List
+from typing import Mapping
+from typing import Optional
+from typing import Tuple
 
 import pytest  # type: ignore[import]
 import requests
 
-from scraper.http import DEFAULT_BASE_URL, DEFAULT_USER_AGENTS, SputnikClient
+from scraper.http import DEFAULT_BASE_URL
+from scraper.http import DEFAULT_USER_AGENTS
+from scraper.http import SputnikClient
 
 
 class DummyResponse(requests.Response):

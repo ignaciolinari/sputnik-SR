@@ -3,13 +3,17 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import List, Optional, cast
+from datetime import datetime
+from datetime import timezone
+from typing import List
+from typing import Optional
+from typing import cast
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 from .http import SputnikClient
+
 
 LOGGER = logging.getLogger(__name__)
 

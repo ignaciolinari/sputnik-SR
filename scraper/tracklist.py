@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
+from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from .http import SputnikClient
+
 
 LOGGER = logging.getLogger(__name__)
 

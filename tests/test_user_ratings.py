@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scraper.user_ratings import fetch_user_ratings, parse_user_ratings_page
+from scraper.user_ratings import fetch_user_ratings
+from scraper.user_ratings import parse_user_ratings_page
+
 
 SAMPLE_RATINGS_HTML = """
 <html>

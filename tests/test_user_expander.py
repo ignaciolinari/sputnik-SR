@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable
+from typing import List
+from typing import Optional
 
 import pytest  # type: ignore[import]
 
-from crawler.user_expander import ExpansionConfig, expand_users
+from crawler.user_expander import ExpansionConfig
+from crawler.user_expander import expand_users
 from scraper.user_ratings import UserRatingEntry
 from scraper.users import UserProfile
+
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "data" / "schema.sql"
 

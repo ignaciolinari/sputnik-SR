@@ -5,14 +5,21 @@ import random
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 from itertools import cycle
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any
+from typing import Callable
+from typing import Iterable
+from typing import Mapping
+from typing import Optional
 from urllib.parse import urljoin
 
 import requests
-from requests import RequestException, Response
+from requests import RequestException
+from requests import Response
+
 
 DEFAULT_BASE_URL = "https://www.sputnikmusic.com"
 DEFAULT_TIMEOUT = 20

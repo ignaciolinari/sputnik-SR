@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scraper.discography import parse_artist_discography
 
+
 SAMPLE_DISCOGRAPHY_HTML = """
 <html>
   <body>

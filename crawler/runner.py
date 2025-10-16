@@ -3,24 +3,29 @@ from __future__ import annotations
 import argparse
 import logging
 import sqlite3
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from dataclasses import replace
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Iterable
+from typing import List
+from typing import Optional
+from typing import Sequence
+from typing import Set
 
 import requests
 
-from scraper import (
-    ChartEntry,
-    SoundoffEntry,
-    SputnikClient,
-    TrackEntry,
-    UserProfile,
-    fetch_best_albums,
-    fetch_soundoffs,
-    fetch_tracklist,
-    fetch_user_profile,
-)
+from scraper import ChartEntry
+from scraper import SoundoffEntry
+from scraper import SputnikClient
+from scraper import TrackEntry
+from scraper import UserProfile
+from scraper import fetch_best_albums
+from scraper import fetch_soundoffs
+from scraper import fetch_tracklist
+from scraper import fetch_user_profile
+
 
 LOGGER = logging.getLogger(__name__)
 

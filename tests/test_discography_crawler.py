@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable
+from typing import List
 
 import pytest  # type: ignore[import]
 
-from crawler.discography import DiscographyConfig, expand_discographies
+from crawler.discography import DiscographyConfig
+from crawler.discography import expand_discographies
 from scraper.discography import ArtistReleaseEntry
 from scraper.soundoffs import SoundoffEntry
 from scraper.tracklist import TrackEntry
+
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "data" / "schema.sql"
 

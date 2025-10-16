@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+from datetime import timezone
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 from .http import SputnikClient
+
 
 LOGGER = logging.getLogger(__name__)
 

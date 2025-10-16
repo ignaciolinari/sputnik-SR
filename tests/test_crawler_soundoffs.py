@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest  # type: ignore[import]
 
-from crawler.runner import CrawlConfig, _persist_soundoffs
+from crawler.runner import CrawlConfig
+from crawler.runner import _persist_soundoffs
 from scraper.soundoffs import SoundoffEntry
 from scraper.users import UserProfile
 

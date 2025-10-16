@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
-from typing import Any, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from dataclasses import asdict
+from dataclasses import dataclass
+from typing import Any
+from typing import List
+from typing import Optional
+from typing import Tuple
+from urllib.parse import urljoin
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from .http import DEFAULT_BASE_URL, SputnikClient
+from .http import DEFAULT_BASE_URL
+from .http import SputnikClient
+
 
 ALBUM_PATH_RE = re.compile(r"['\"](/album/[^'\"]+)['\"]")
 ALBUM_ID_RE = re.compile(r"/album/(\d+)/")

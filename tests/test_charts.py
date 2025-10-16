@@ -5,8 +5,11 @@ from typing import cast
 
 import pytest  # type: ignore[import]
 
-from scraper.charts import ChartEntry, fetch_best_albums, parse_best_album_chart
+from scraper.charts import ChartEntry
+from scraper.charts import fetch_best_albums
+from scraper.charts import parse_best_album_chart
 from scraper.http import SputnikClient
+
 
 SAMPLE_CHART_HTML = """
 <table>

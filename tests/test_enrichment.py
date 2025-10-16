@@ -4,6 +4,7 @@ from scraper.soundoffs import parse_soundoff_page
 from scraper.tracklist import parse_tracklist_html
 from scraper.users import parse_user_profile
 
+
 SAMPLE_SOUNDOFF_HTML = """
 <table style="border-top:8px solid #444;">
   <tr>

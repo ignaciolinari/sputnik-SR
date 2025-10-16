@@ -3,13 +3,16 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
+from typing import Optional
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from .http import DEFAULT_BASE_URL, SputnikClient
+from .http import DEFAULT_BASE_URL
+from .http import SputnikClient
+
 
 LOGGER = logging.getLogger(__name__)
 

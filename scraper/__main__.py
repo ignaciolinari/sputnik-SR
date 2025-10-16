@@ -5,12 +5,15 @@ import json
 import logging
 import sys
 from dataclasses import asdict
-from datetime import datetime, timezone
-from typing import Iterable, List
+from datetime import datetime
+from datetime import timezone
+from typing import Iterable
+from typing import List
 
 import requests
 
-from .charts import ChartEntry, fetch_best_albums
+from .charts import ChartEntry
+from .charts import fetch_best_albums
 
 
 def _iter_years(years: Iterable[int]) -> List[int]:

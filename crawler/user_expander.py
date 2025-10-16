@@ -4,13 +4,20 @@ import argparse
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable
+from typing import Iterable
+from typing import List
+from typing import Optional
 
 from scraper import SputnikClient
-from scraper.user_ratings import UserRatingEntry, fetch_user_ratings
-from scraper.users import UserProfile, fetch_user_profile
+from scraper.user_ratings import UserRatingEntry
+from scraper.user_ratings import fetch_user_ratings
+from scraper.users import UserProfile
+from scraper.users import fetch_user_profile
+
 
 LOGGER = logging.getLogger(__name__)
 
