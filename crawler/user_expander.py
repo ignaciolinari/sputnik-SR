@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Callable
 from typing import Iterable
 from typing import List
 from typing import Optional
+from typing import Protocol
 
 from scraper import SputnikClient
 from scraper.user_ratings import UserRatingEntry
@@ -20,6 +20,16 @@ from scraper.users import fetch_user_profile
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _parse_optional_int(value: str) -> Optional[int]:
+    normalized = value.strip().lower()
+    if normalized in {"", "none", "null", "-"}:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:  # pragma: no cover - argparse surfaces this as usage error
+        raise argparse.ArgumentTypeError(f"expected integer or 'none', got '{value}'") from exc
 
 
 @dataclass(slots=True)
@@ -34,13 +44,25 @@ class ExpansionConfig:
     max_rating_pages: Optional[int] = None
 
 
+class ProfileFetcher(Protocol):
+    def __call__(self, user_id: str, *, client: SputnikClient) -> Optional[UserProfile]: ...
+
+
+class RatingsFetcher(Protocol):
+    def __call__(
+        self,
+        user_id: str,
+        *,
+        client: SputnikClient,
+        max_pages: Optional[int],
+    ) -> List[UserRatingEntry]: ...
+
+
 def expand_users(
     config: ExpansionConfig,
     *,
-    profile_fetcher: Callable[[str, SputnikClient], Optional[UserProfile]] = fetch_user_profile,
-    ratings_fetcher: Callable[
-        [str, SputnikClient, Optional[int]], List[UserRatingEntry]
-    ] = fetch_user_ratings,
+    profile_fetcher: ProfileFetcher = fetch_user_profile,
+    ratings_fetcher: RatingsFetcher = fetch_user_ratings,
     client: Optional[SputnikClient] = None,
 ) -> None:
     database_path = config.database_path
@@ -138,16 +160,20 @@ def _process_user(
     user_id: str,
     client: SputnikClient,
     config: ExpansionConfig,
-    profile_fetcher: Callable[[str, SputnikClient], Optional[UserProfile]],
-    ratings_fetcher: Callable[[str, SputnikClient, Optional[int]], List[UserRatingEntry]],
+    profile_fetcher: ProfileFetcher,
+    ratings_fetcher: RatingsFetcher,
 ) -> None:
     LOGGER.info("Processing user %s", user_id)
     if config.fetch_profiles:
-        profile = profile_fetcher(user_id, client)
+        profile = profile_fetcher(user_id, client=client)
         if profile:
             _upsert_user_profile(connection, profile)
 
-    rating_entries = ratings_fetcher(user_id, client, config.max_rating_pages)
+    rating_entries = ratings_fetcher(
+        user_id,
+        client=client,
+        max_pages=config.max_rating_pages,
+    )
     if not rating_entries:
         LOGGER.debug("No ratings found for user %s", user_id)
         return
@@ -341,8 +367,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-rating-pages",
-        type=int,
-        help="Optional cap on rating pages per user",
+        type=_parse_optional_int,
+        help="Optional cap on rating pages per user (accepts integer or 'none')",
     )
     parser.add_argument(
         "--skip-profiles",

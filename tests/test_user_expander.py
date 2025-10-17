@@ -63,8 +63,8 @@ def _ratings_fetcher(
             release_title="Sample Album",
             artist_name="New Artist",
             rating=4.5,
-            rating_date="2024-06-01",
-            url="https://example.com/user/test/ratings/",
+            rating_date=None,
+            url="https://example.com/uservote.php?memberid=test",
         ),
         UserRatingEntry(
             user_id=user_id,
@@ -72,8 +72,8 @@ def _ratings_fetcher(
             release_title="Existing Album",
             artist_name="Existing Artist",
             rating=3.0,
-            rating_date="2023-05-10",
-            url="https://example.com/user/test/ratings/",
+            rating_date=None,
+            url="https://example.com/uservote.php?memberid=test",
         ),
     ]
 
@@ -97,9 +97,9 @@ def test_expand_users_updates_profiles_and_interactions(db_path: Path) -> None:
             batch_size=1,
             fetch_profiles=True,
         ),
-        profile_fetcher=_profile_fetcher,
-        ratings_fetcher=_ratings_fetcher,
-        client=StubClient(),
+        profile_fetcher=_profile_fetcher,  # type: ignore[arg-type]
+        ratings_fetcher=_ratings_fetcher,  # type: ignore[arg-type]
+        client=StubClient(),  # type: ignore[arg-type]
     )
 
     with sqlite3.connect(db_path) as connection:
@@ -118,7 +118,7 @@ def test_expand_users_updates_profiles_and_interactions(db_path: Path) -> None:
             "SELECT id_release, rating, rating_date FROM interactions WHERE id_user = ? ORDER BY id_release",
             ("test-user",),
         ).fetchall()
-        assert interaction_rows == [(100, 4.5, "2024-06-01"), (200, 3.0, "2023-05-10")]
+        assert interaction_rows == [(100, 4.5, None), (200, 3.0, None)]
 
         queue_row = connection.execute(
             "SELECT status, attempts FROM crawl_users WHERE id_user = ?",

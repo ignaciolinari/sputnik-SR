@@ -40,7 +40,12 @@ def _db_path(tmp_path: Path) -> Iterable[Path]:
     yield db_file
 
 
-def _fetch_discography(artist_id: int, client: StubClient) -> List[ArtistReleaseEntry]:
+def _fetch_discography(
+    artist_id: int,
+    *,
+    artist_slug: str | None = None,
+    client: StubClient | None = None,
+) -> List[ArtistReleaseEntry]:
     assert artist_id == 1
     return [
         ArtistReleaseEntry(
@@ -97,7 +102,7 @@ def test_expand_discographies_inserts_releases_and_interactions(
             fetch_tracklists=True,
             fetch_soundoffs=True,
         ),
-        client=StubClient(),
+        client=StubClient(),  # type: ignore[arg-type]
     )
 
     with sqlite3.connect(db_path) as connection:
@@ -124,3 +129,38 @@ def test_expand_discographies_inserts_releases_and_interactions(
             (1,),
         ).fetchone()
         assert artist_row == ("done",)
+
+
+def test_expand_discographies_marks_error_when_slug_missing(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("crawler.discography.fetch_artist_discography", _fetch_discography)
+    monkeypatch.setattr("crawler.discography.fetch_tracklist", _fetch_tracklist)
+    monkeypatch.setattr("crawler.discography.fetch_soundoffs", _fetch_soundoffs)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("UPDATE artists SET name='' WHERE id_artist = 1")
+        connection.execute(
+            "UPDATE crawl_artists SET status='pending', attempts=0, last_error=NULL, updated_at=datetime('now') WHERE id_artist = 1"
+        )
+        connection.commit()
+
+    expand_discographies(
+        DiscographyConfig(
+            database_path=db_path,
+            schema_path=SCHEMA_PATH,
+            batch_size=1,
+            fetch_tracklists=True,
+            fetch_soundoffs=True,
+        ),
+        client=StubClient(),  # type: ignore[arg-type]
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        status, last_error = connection.execute(
+            "SELECT status, last_error FROM crawl_artists WHERE id_artist = ?",
+            (1,),
+        ).fetchone()
+
+    assert status == "error"
+    assert last_error is not None and "slug" in last_error.lower()

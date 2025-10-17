@@ -4,47 +4,76 @@ from scraper.user_ratings import fetch_user_ratings
 from scraper.user_ratings import parse_user_ratings_page
 
 
-SAMPLE_RATINGS_HTML = """
+SAMPLE_USER_VOTES_HTML = """
 <html>
   <body>
-    <table class="ratings">
-      <tr>
-        <td><a href="/album/123/Foo-Bar/">Foo Bar</a></td>
-        <td><a href="/bands/foo">Foo Artist</a></td>
-        <td>4.5 superb</td>
-        <td>05/01/24</td>
+    <table class="tableborder">
+      <tr class="profilebox">
+        <td><b>4.5</b> superb</td>
       </tr>
-      <tr>
-        <td><a href="/album/456/Baz-Quux/">Baz Quux</a></td>
-        <td>Baz Collective</td>
-        <td>3 average</td>
-        <td>April 10, 2023</td>
+      <tr class="default">
+        <td>
+          <a href="/album/123/Foo-Bar/">
+            <font class="mediumbright">
+              Foo Artist
+              <font class="smalloffset">Foo Bar</font>
+            </font>
+          </a>
+        </td>
       </tr>
-      <tr>
-        <td>No album</td>
-        <td>Unknown</td>
-        <td>2.5 average</td>
-        <td>04/12/23</td>
+      <tr class="default2">
+        <td>
+          <a href="/album/456/Baz-Quux/">
+            <font class="mediumbright">
+              Baz Collective
+              <font class="smalloffset">Baz Quux</font>
+            </font>
+          </a>
+        </td>
+      </tr>
+      <tr class="alt2">
+        <td>Comment we ignore</td>
+      </tr>
+    </table>
+    <table class="tableborder">
+      <tr class="profilebox">
+        <td><b>3</b> average</td>
+      </tr>
+      <tr class="default">
+        <td>
+          <a href="/album/789/Gamma-Release/">
+            <font class="mediumbright">
+              Gamma Artist
+              <font class="smalloffset">Gamma Release</font>
+            </font>
+          </a>
+        </td>
       </tr>
     </table>
     <div class="pagination">
-      <a href="?page=1">1</a>
-      <a href="?page=2">2</a>
-      <a href="?page=3">Next</a>
+      <a href="uservote.php?memberid=tester&page=1">1</a>
+      <a href="uservote.php?memberid=tester&page=2">Next</a>
     </div>
   </body>
 </html>
 """
 
-SINGLE_PAGE_RATINGS_HTML = """
+SINGLE_PAGE_USER_VOTES_HTML = """
 <html>
   <body>
-    <table class="ratings">
-      <tr>
-        <td><a href="/album/999/Alpha-Release/">Alpha Release</a></td>
-        <td>Alpha Artist</td>
-        <td>5 classic</td>
-        <td>01/01/22</td>
+    <table class="tableborder">
+      <tr class="profilebox">
+        <td><b>5</b> classic</td>
+      </tr>
+      <tr class="default">
+        <td>
+          <a href="/album/999/Alpha-Release/">
+            <font class="mediumbright">
+              Alpha Artist
+              <font class="smalloffset">Alpha Release</font>
+            </font>
+          </a>
+        </td>
       </tr>
     </table>
   </body>
@@ -71,13 +100,13 @@ class DummyClient:
 
 def test_parse_user_ratings_page_extracts_entries_and_pagination() -> None:
     entries, has_more = parse_user_ratings_page(
-        SAMPLE_RATINGS_HTML,
+        SAMPLE_USER_VOTES_HTML,
         user_id="tester",
-        source_url="https://example.com/user/tester/ratings/",
+        source_url="https://example.com/uservote.php?memberid=tester",
     )
 
     assert has_more is True
-    assert len(entries) == 2
+    assert len(entries) == 3
 
     first = entries[0]
     assert first.user_id == "tester"
@@ -85,31 +114,37 @@ def test_parse_user_ratings_page_extracts_entries_and_pagination() -> None:
     assert first.release_title == "Foo Bar"
     assert first.artist_name == "Foo Artist"
     assert first.rating == 4.5
-    assert first.rating_date == "2024-05-01"
-    assert first.url == "https://example.com/user/tester/ratings/"
+    assert first.rating_date is None
+    assert first.url == "https://example.com/uservote.php?memberid=tester"
 
     second = entries[1]
     assert second.release_id == 456
     assert second.artist_name == "Baz Collective"
-    assert second.rating == 3.0
-    assert second.rating_date == "2023-04-10"
+    assert second.rating == 4.5
+    assert second.rating_date is None
+
+    third = entries[2]
+    assert third.release_id == 789
+    assert third.artist_name == "Gamma Artist"
+    assert third.rating == 3.0
+    assert third.rating_date is None
 
 
 def test_fetch_user_ratings_stops_when_no_more_pages() -> None:
     client = DummyClient()
     client.queue_response(
-        "https://example.com/user/tester/ratings/",
-        SAMPLE_RATINGS_HTML,
+        "https://example.com/uservote.php?memberid=tester",
+        SAMPLE_USER_VOTES_HTML,
     )
     client.queue_response(
-        "https://example.com/user/tester/ratings/?page=2",
-        SINGLE_PAGE_RATINGS_HTML,
+        "https://example.com/uservote.php?memberid=tester&page=2",
+        SINGLE_PAGE_USER_VOTES_HTML,
     )
 
-    entries = fetch_user_ratings("tester", client=client)
-    assert len(entries) == 3
-    assert [entry.release_id for entry in entries] == [123, 456, 999]
+    entries = fetch_user_ratings("tester", client=client)  # type: ignore[arg-type]
+    assert len(entries) == 4
+    assert [entry.release_id for entry in entries] == [123, 456, 789, 999]
     assert client.calls == [
-        ("/user/tester/ratings/", None),
-        ("/user/tester/ratings/", {"page": 2}),
+        ("/uservote.php", {"memberid": "tester"}),
+        ("/uservote.php", {"memberid": "tester", "page": "2"}),
     ]

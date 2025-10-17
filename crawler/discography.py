@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -130,7 +132,14 @@ def _process_artist(
     config: DiscographyConfig,
 ) -> None:
     LOGGER.info("Processing artist %s", artist_id)
-    releases = fetch_artist_discography(artist_id, client=client)
+    artist_slug = _lookup_artist_slug(connection, artist_id)
+    if not artist_slug:
+        raise RuntimeError(f"Missing slug for artist {artist_id}; cannot fetch discography")
+    releases = fetch_artist_discography(
+        artist_id,
+        artist_slug=artist_slug,
+        client=client,
+    )
     if not releases:
         LOGGER.debug("No releases found for artist %s", artist_id)
         return
@@ -284,6 +293,27 @@ def _ensure_user_stub(connection: sqlite3.Connection, user_id: str, role: Option
         """,
         (user_id, role),
     )
+
+
+def _lookup_artist_slug(connection: sqlite3.Connection, artist_id: int) -> Optional[str]:
+    cursor = connection.execute(
+        "SELECT name FROM artists WHERE id_artist = ?",
+        (artist_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    name = row[0]
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return _slugify_artist_name(name)
+
+
+def _slugify_artist_name(name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", ascii_only).strip("-")
+    return slug or name.replace(" ", "-")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

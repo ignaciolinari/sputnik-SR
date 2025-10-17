@@ -6,24 +6,39 @@ from scraper.discography import parse_artist_discography
 SAMPLE_DISCOGRAPHY_HTML = """
 <html>
   <body>
-    <table class="discog">
+    <table class="plaincontentbox">
       <tr>
-        <td><a href="/album/123/Foo-Album/"><img src="/images/123.jpg" />Foo Album</a></td>
-        <td>LP</td>
-        <td>2020</td>
-        <td>4.3 (120 ratings)</td>
+        <td colspan="6">
+          <span><font>LPs</font></span>
+        </td>
       </tr>
       <tr>
-        <td><a href="/album/456/Bar-Album/"><img data-original="/images/456.jpg" />Bar Album</a></td>
-        <td>EP</td>
-        <td>2018</td>
-        <td>3.5 (45 ratings)</td>
-      </tr>
-      <tr>
-        <td>No link</td>
-        <td>LP</td>
-        <td>2015</td>
-        <td>4.0 (10 ratings)</td>
+        <td width="120" style="padding:12px;">
+          <a href="/album/123/Foo-Album/">
+            <img src="/images/albums/123.jpg-thumbl" />
+          </a>
+        </td>
+        <td style="padding-top:20px;">
+          <font size="2"><b><a href="/album/123/Foo-Album/"><font color="#111111">Foo Album</font></a></b></font><br />
+          <font color="#999999" size="1">02/10/2020</font>
+          <table><tr><td><center>
+            <font color="#FF0000" size="4"><b>4.3</b></font><br />
+            <font size="1">120 Votes</font>
+          </center></td></tr></table>
+        </td>
+        <td width="120" style="padding:12px;">
+          <a href="/album/456/Bar-Album/">
+            <img data-original="/images/albums/456.jpg-thumbl" />
+          </a>
+        </td>
+        <td style="padding-top:20px;">
+          <font size="2"><b><a href="/album/456/Bar-Album/">Bar Album</a></b></font><br />
+          <font color="#999999" size="1">2018</font>
+          <table><tr><td><center>
+            <font color="#FF0000" size="4"><b>3.5</b></font><br />
+            <font size="1">45 Votes</font>
+          </center></td></tr></table>
+        </td>
       </tr>
     </table>
   </body>
@@ -48,12 +63,12 @@ def test_parse_artist_discography_extracts_releases() -> None:
     assert first.release_year == 2020
     assert first.avg_rating == 4.3
     assert first.ratings_count == 120
-    assert first.art_url == "https://example.com/images/123.jpg"
+    assert first.art_url == "https://example.com/images/albums/123.jpg-thumbl"
 
     second = entries[1]
     assert second.release_id == 456
-    assert second.release_type == "EP"
+    assert second.release_type == "LP"
     assert second.release_year == 2018
     assert second.avg_rating == 3.5
     assert second.ratings_count == 45
-    assert second.art_url == "https://example.com/images/456.jpg"
+    assert second.art_url == "https://example.com/images/albums/456.jpg-thumbl"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 DB_PATH=${1:-data/sputnik.db}
 LOG_PATH=${2:-logs/crawler-full.log}
-REFRESH_INTERVAL=${REFRESH_INTERVAL:-5}
+REFRESH_INTERVAL=${REFRESH_INTERVAL:-30}
 
 # Crear directorio de logs si no existe
 mkdir -p "$(dirname "${LOG_PATH}")"
@@ -41,7 +41,8 @@ show_menu() {
   echo "3) Ver estadísticas de la base de datos"
   echo "4) Ver estado de colas de expansión"
   echo "5) Ver todo (modo automático)"
-  echo "6) Salir"
+  echo "6) Ver errores recientes"
+  echo "7) Salir"
   echo
 }
 
@@ -60,6 +61,72 @@ show_log() {
     echo "Últimas 30 líneas:"
     echo
     tail -n 30 "${LOG_PATH}"
+  fi
+
+  echo
+  read -p "Presiona Enter para continuar..."
+}
+
+# Función para mostrar errores recientes en las colas de trabajo
+show_recent_errors() {
+  echo "=== Errores recientes en colas ==="
+  echo
+
+  if [[ -f "${DB_PATH}" ]]; then
+    echo "Artistas con error (últimos 10):"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 8 26 10 20 50
+SELECT
+  ca.id_artist AS "ID",
+  COALESCE(a.name, '-') AS "Artista",
+  ca.attempts AS "Intentos",
+  COALESCE(ca.updated_at, '-') AS "Actualizado",
+  substr(COALESCE(ca.last_error, 'Sin detalle'), 1, 80) AS "Último error"
+FROM crawl_artists ca
+LEFT JOIN artists a ON a.id_artist = ca.id_artist
+WHERE ca.status = 'error'
+ORDER BY ca.updated_at DESC
+LIMIT 10;
+SQL
+
+    echo
+    echo "Usuarios con error (últimos 10):"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 18 10 20 50
+SELECT
+  id_user AS "Usuario",
+  attempts AS "Intentos",
+  COALESCE(updated_at, '-') AS "Actualizado",
+  substr(COALESCE(last_error, 'Sin detalle'), 1, 80) AS "Último error"
+FROM crawl_users
+WHERE status = 'error'
+ORDER BY updated_at DESC
+LIMIT 10;
+SQL
+
+    echo
+    echo "Releases con error (últimos 10):"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 8 32 20 50
+SELECT
+  cr.id_release AS "ID",
+  COALESCE(r.title, '-') AS "Título",
+  COALESCE(cr.updated_at, '-') AS "Actualizado",
+  substr(COALESCE(cr.last_error, 'Sin detalle'), 1, 80) AS "Último error"
+FROM crawl_releases cr
+LEFT JOIN releases r ON r.id_release = cr.id_release
+WHERE cr.status = 'error'
+ORDER BY cr.updated_at DESC
+LIMIT 10;
+SQL
+  else
+    echo "Base de datos no encontrada en ${DB_PATH}"
   fi
 
   echo
@@ -94,6 +161,18 @@ SELECT '  ' || status || ': ' || COUNT(*) || ' años'
 FROM crawl_state
 GROUP BY status
 ORDER BY COUNT(*) DESC;
+SQL
+
+    echo
+    echo "Resumen general de años:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Años totales: ' || COUNT(*) FROM crawl_state;
+SELECT '  Años completados: ' || SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) FROM crawl_state;
+SELECT '  Años en progreso: ' || SUM(CASE WHEN status IN ('pending','processing','seeded') THEN 1 ELSE 0 END) FROM crawl_state;
+SELECT '  Años con error: ' || SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) FROM crawl_state;
+SELECT '  Porcentaje completado: ' || printf('%.1f%%', CASE WHEN COUNT(*) = 0 THEN 0 ELSE (SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) * 100.0) / COUNT(*) END) FROM crawl_state;
 SQL
   else
     echo "Base de datos no encontrada en ${DB_PATH}"
@@ -151,6 +230,41 @@ SELECT '  Rating ' || CAST(ROUND(rating) AS INTEGER) || ': ' || COUNT(*)
 FROM interactions
 GROUP BY ROUND(rating)
 ORDER BY ROUND(rating) DESC;
+SQL
+
+    echo
+    echo "Top 5 releases por cantidad de ratings:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 30 25 10 10
+SELECT
+  r.title AS "Release",
+  COALESCE(a.name, '-') AS "Artista",
+  r.ratings_count AS "Ratings",
+  printf('%.2f', r.avg_rating) AS "Promedio"
+FROM releases r
+LEFT JOIN artists a ON a.id_artist = r.artist_id
+WHERE r.ratings_count IS NOT NULL
+ORDER BY r.ratings_count DESC
+LIMIT 5;
+SQL
+
+    echo
+    echo "Últimos 5 releases insertados:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 6 30 25 6
+SELECT
+  r.id_release AS "ID",
+  r.title AS "Título",
+  COALESCE(a.name, '-') AS "Artista",
+  COALESCE(r.release_year, '-') AS "Año"
+FROM releases r
+LEFT JOIN artists a ON a.id_artist = r.artist_id
+ORDER BY r.id_release DESC
+LIMIT 5;
 SQL
   else
     echo "Base de datos no encontrada en ${DB_PATH}"
@@ -227,6 +341,42 @@ SELECT '  Releases totales: ' || COUNT(*) FROM crawl_releases;
 SELECT '  Usuarios pendientes: ' || COUNT(*) FROM crawl_users WHERE status = 'pending';
 SELECT '  Artistas pendientes: ' || COUNT(*) FROM crawl_artists WHERE status = 'pending';
 SQL
+
+    echo
+    echo "Artistas pendientes destacados (hasta 10):"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 8 26 10 10 40
+SELECT
+  ca.id_artist AS "ID",
+  COALESCE(a.name, '-') AS "Artista",
+  ca.status AS "Estado",
+  ca.attempts AS "Intentos",
+  substr(COALESCE(ca.last_error, 'Sin errores'), 1, 60) AS "Último error"
+FROM crawl_artists ca
+LEFT JOIN artists a ON a.id_artist = ca.id_artist
+WHERE ca.status IN ('pending','processing','error')
+ORDER BY CASE ca.status WHEN 'error' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END, ca.updated_at ASC
+LIMIT 10;
+SQL
+
+    echo
+    echo "Usuarios pendientes destacados (hasta 10):"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers on
+.mode table
+.width 18 10 10 40
+SELECT
+  id_user AS "Usuario",
+  status AS "Estado",
+  attempts AS "Intentos",
+  substr(COALESCE(last_error, 'Sin errores'), 1, 60) AS "Último error"
+FROM crawl_users
+WHERE status IN ('pending','processing','error')
+ORDER BY CASE status WHEN 'error' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END, updated_at ASC
+LIMIT 10;
+SQL
   else
     echo "Base de datos no encontrada en ${DB_PATH}"
   fi
@@ -274,7 +424,7 @@ SQL
 # Loop principal del menú
 while true; do
   show_menu
-  read -p "Elige una opción (1-6): " choice
+  read -p "Elige una opción (1-7): " choice
   echo
 
   case $choice in
@@ -294,6 +444,9 @@ while true; do
       auto_mode
       ;;
     6)
+      show_recent_errors
+      ;;
+    7)
       echo "¡Hasta luego!"
       exit 0
       ;;

@@ -112,23 +112,10 @@ Para poblar la base más rápido y profundizar después, podés separar la inges
             --log-level INFO
         ```
 
-2. **Expansión de usuarios**
-   - Consume `crawl_users` y trae el resto de los ratings públicos de cada perfil.
-  - `crawler.user_expander` respeta claves únicas, actualiza perfiles y marca cada usuario como `done` o `error`.
-   - Script sugerido: `scripts/expand_users.sh`
-
-        ```bash
-        python -m crawler.user_expander \
-            --db data/sputnik.db \
-            --schema data/schema.sql \
-            --batch-size 25 \
-            --max-rating-pages 10 \
-            --log-level INFO
-        ```
-
-3. **Discografías extendidas**
-   - Con los artistas ya en base (desde los charts), podés recorrerlos y sumar releases faltantes.
-   - El módulo `crawler.discography` trae la discografía pública, opcionalmente tracklists y soundoffs.
+2. **Discografías extendidas**
+   - Con los artistas detectados en la fase anterior, recorré `crawl_artists` para completar releases y metadatos antes de sumar más ratings.
+   - El módulo `crawler.discography` trae la discografía pública y, de forma opcional, tracklists y soundoffs adicionales.
+   - Recomendación: ejecutar este paso antes de expandir usuarios para que las interacciones futuras apunten a releases ya poblados.
    - Utilizar `scripts/expand_discographies.sh` o correr este ejemplo:
 
         ```bash
@@ -137,6 +124,21 @@ Para poblar la base más rápido y profundizar después, podés separar la inges
             --schema data/schema.sql \
             --batch-size 25 \
             --max-soundoffs 100 \
+            --log-level INFO
+        ```
+
+3. **Expansión de usuarios**
+   - Consume `crawl_users` y trae los ratings públicos de cada perfil mediante `uservote.php` (no expone la fecha exacta del voto).
+   - `crawler.user_expander` respeta claves únicas, actualiza perfiles y marca cada usuario como `done` o `error`.
+   - Ejecutalo una vez que la discografía esté cargada para minimizar stubs y re-procesamientos.
+   - Script sugerido: `scripts/expand_users.sh`
+
+        ```bash
+        python -m crawler.user_expander \
+            --db data/sputnik.db \
+            --schema data/schema.sql \
+            --batch-size 25 \
+            --max-rating-pages none \
             --log-level INFO
         ```
 

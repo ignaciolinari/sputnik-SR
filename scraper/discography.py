@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
+from requests import TooManyRedirects
 
 from .http import DEFAULT_BASE_URL
 from .http import SputnikClient
@@ -17,6 +18,38 @@ from .http import SputnikClient
 LOGGER = logging.getLogger(__name__)
 
 _ALBUM_ID_RE = re.compile(r"/album/(\d+)/")
+_BAND_URL_RE = re.compile(r"/bands/([^/]+)/(?P<artist_id>\d+)/")
+
+_CATEGORY_MAP: dict[str, str] = {
+    "lp": "LP",
+    "lps": "LP",
+    "full-length": "LP",
+    "full length": "LP",
+    "albums": "LP",
+    "album": "LP",
+    "live": "LP",
+    "live albums": "LP",
+    "split": "LP",
+    "splits": "LP",
+    "split albums": "LP",
+    "demos": "LP",
+    "demo": "LP",
+    "eps": "EP",
+    "ep": "EP",
+    "mini albums": "EP",
+    "singles": "Single",
+    "single": "Single",
+    "compilation": "Compilation",
+    "compilations": "Compilation",
+    "soundtracks": "Compilation",
+    "soundtrack": "Compilation",
+    "boxsets": "Compilation",
+    "box sets": "Compilation",
+    "box set": "Compilation",
+    "best of": "Compilation",
+    "misc": "Compilation",
+    "miscellaneous": "Compilation",
+}
 
 
 @dataclass(slots=True)
@@ -35,18 +68,67 @@ class ArtistReleaseEntry:
 def fetch_artist_discography(
     artist_id: int,
     *,
+    artist_slug: Optional[str] = None,
     client: Optional[SputnikClient] = None,
 ) -> List[ArtistReleaseEntry]:
     owns_client = client is None
     active_client = client or SputnikClient()
     try:
-        response = active_client.get(f"/bands/{artist_id}/")
-        return parse_artist_discography(
-            response.text,
-            artist_id=artist_id,
-            source_url=response.url,
-            base_url=active_client.base_url,
-        )
+        candidate_slugs: list[str] = []
+        if artist_slug:
+            candidate_slugs.append(artist_slug)
+        else:
+            try:
+                initial_response = active_client.get(f"/bands/{artist_id}/")
+            except TooManyRedirects:
+                LOGGER.warning("Too many redirects while resolving slug for artist %s", artist_id)
+                return []
+
+            slug_from_url = _extract_artist_slug(initial_response.url, artist_id)
+            if not slug_from_url:
+                LOGGER.warning("Artist %s has no slug; discography fetch skipped", artist_id)
+                return []
+            candidate_slugs.append(slug_from_url)
+
+        for slug in candidate_slugs:
+            band_path = f"/band/{_format_band_slug(slug)}"
+            try:
+                response = active_client.get(band_path)
+            except TooManyRedirects:
+                LOGGER.debug(
+                    "Too many redirects while fetching %s for artist %s", band_path, artist_id
+                )
+                response = None
+            else:
+                releases = parse_artist_discography(
+                    response.text,
+                    artist_id=artist_id,
+                    source_url=response.url,
+                    base_url=active_client.base_url,
+                )
+                if releases:
+                    return releases
+
+            legacy_path = f"/bands/{slug}/{artist_id}/?page=releases"
+            try:
+                response = active_client.get(legacy_path)
+            except TooManyRedirects:
+                LOGGER.debug(
+                    "Too many redirects while fetching %s for artist %s", legacy_path, artist_id
+                )
+                continue
+
+            releases = parse_artist_discography(
+                response.text,
+                artist_id=artist_id,
+                source_url=response.url,
+                base_url=active_client.base_url,
+            )
+            if releases:
+                return releases
+
+        LOGGER.debug("No discography parsed for artist %s after all attempts", artist_id)
+        return []
     finally:
         if owns_client:
             active_client.close()
@@ -63,10 +145,41 @@ def parse_artist_discography(
     releases: List[ArtistReleaseEntry] = []
 
     table = soup.find("table", class_="discog")
-    if table is None:
-        LOGGER.debug("No discography table found for artist %s", artist_id)
-        return []
+    if table is not None:
+        return _parse_legacy_discography_table(
+            table,
+            artist_id=artist_id,
+            source_url=source_url,
+            base_url=base_url,
+        )
 
+    container = soup.find("table", class_="plaincontentbox")
+    if container is not None:
+        releases = _parse_modern_discography(
+            container,
+            artist_id=artist_id,
+            source_url=source_url,
+            base_url=base_url,
+        )
+        if releases:
+            return releases
+
+    return _parse_modern_discography(
+        soup,
+        artist_id=artist_id,
+        source_url=source_url,
+        base_url=base_url,
+    )
+
+
+def _parse_legacy_discography_table(
+    table: Tag,
+    *,
+    artist_id: int,
+    source_url: str,
+    base_url: str,
+) -> List[ArtistReleaseEntry]:
+    releases: List[ArtistReleaseEntry] = []
     rows = table.find_all("tr")
     for row in rows:
         columns = row.find_all("td")
@@ -77,7 +190,11 @@ def parse_artist_discography(
         if not anchor:
             continue
 
-        release_id = _extract_release_id(anchor["href"])
+        href_value = anchor.get("href")
+        if not isinstance(href_value, str):
+            continue
+
+        release_id = _extract_release_id(href_value)
         if release_id is None:
             continue
 
@@ -106,6 +223,158 @@ def parse_artist_discography(
     return releases
 
 
+def _parse_modern_discography(
+    container: Tag,
+    *,
+    artist_id: int,
+    source_url: str,
+    base_url: str,
+) -> List[ArtistReleaseEntry]:
+    releases: List[ArtistReleaseEntry] = []
+    seen_release_ids: set[int] = set()
+
+    for cover_cell in container.find_all("td"):
+        width_attr = cover_cell.get("width")
+        if width_attr is None:
+            continue
+        if isinstance(width_attr, list):
+            width_value = " ".join(str(item) for item in width_attr)
+        else:
+            width_value = str(width_attr)
+        if width_value.strip() != "120":
+            continue
+
+        anchor = cover_cell.find("a", href=True)
+        if not anchor:
+            continue
+
+        href_value = anchor.get("href")
+        if not isinstance(href_value, str):
+            continue
+
+        release_id = _extract_release_id(href_value)
+        if release_id is None or release_id in seen_release_ids:
+            continue
+
+        details_cell = cover_cell.find_next_sibling("td")
+        if details_cell is None:
+            continue
+
+        release_type = _infer_release_type(cover_cell)
+        entry = _parse_release_card(
+            artist_id=artist_id,
+            release_id=release_id,
+            cover_cell=cover_cell,
+            details_cell=details_cell,
+            source_url=source_url,
+            base_url=base_url,
+            release_type=release_type,
+        )
+        if entry is None:
+            continue
+
+        releases.append(entry)
+        seen_release_ids.add(release_id)
+
+    if not releases:
+        LOGGER.debug("No discography content parsed for artist %s", artist_id)
+
+    return releases
+
+
+def _parse_release_card(
+    *,
+    artist_id: int,
+    release_id: int,
+    cover_cell: Tag,
+    details_cell: Tag,
+    source_url: str,
+    base_url: str,
+    release_type: Optional[str],
+) -> Optional[ArtistReleaseEntry]:
+    art_url = _resolve_art_url(cover_cell, base_url)
+
+    title_anchor: Optional[Tag] = None
+    for candidate in details_cell.find_all("a", href=True):
+        href_value = candidate.get("href")
+        if not isinstance(href_value, str):
+            continue
+        if _extract_release_id(href_value) == release_id and candidate.get_text(strip=True):
+            title_anchor = candidate
+            break
+
+    if title_anchor is None:
+        title_anchor = details_cell.find("a", href=True)
+
+    title = title_anchor.get_text(strip=True) if title_anchor else ""
+    if not title:
+        return None
+
+    year = _extract_year_from_details(details_cell)
+
+    rating_container = details_cell.find("center")
+    avg_rating, ratings_count = _extract_rating_info(rating_container)
+
+    return ArtistReleaseEntry(
+        artist_id=artist_id,
+        release_id=release_id,
+        title=title,
+        release_type=release_type,
+        release_year=year,
+        art_url=art_url,
+        avg_rating=avg_rating,
+        ratings_count=ratings_count,
+        source_url=source_url,
+    )
+
+
+def _extract_year_from_details(details_cell: Tag) -> Optional[int]:
+    # Prefer the grey date text shown under each album title.
+    for font in details_cell.find_all("font"):
+        text = font.get_text(strip=True)
+        if not text:
+            continue
+        color_attr = font.get("color")
+        if color_attr:
+            if isinstance(color_attr, list):
+                color_value = " ".join(str(item) for item in color_attr)
+            else:
+                color_value = str(color_attr)
+        else:
+            color_value = ""
+
+        if color_value.lower().startswith("#9999"):
+            year = _parse_year_from_text(text)
+            if year is not None:
+                return year
+
+    # Fall back to scanning any text for a 4-digit year.
+    for text in details_cell.stripped_strings:
+        year = _parse_year_from_text(text)
+        if year is not None:
+            return year
+
+    return None
+
+
+def _parse_year_from_text(value: str) -> Optional[int]:
+    match = re.search(r"(19|20)\d{2}", value)
+    if not match:
+        return None
+    return _parse_year(match.group(0))
+
+
+def _infer_release_type(cover_cell: Tag) -> Optional[str]:
+    span = cover_cell.find_previous("span")
+    if not span:
+        return None
+    label = span.get_text(strip=True)
+    if not label:
+        return None
+    normalized = label.strip().lower()
+    return _CATEGORY_MAP.get(normalized)
+
+
 def _extract_release_id(href: str) -> Optional[int]:
     match = _ALBUM_ID_RE.search(href)
     if not match:
@@ -114,6 +383,24 @@ def _extract_release_id(href: str) -> Optional[int]:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def _extract_artist_slug(url: str, expected_artist_id: int) -> Optional[str]:
+    match = _BAND_URL_RE.search(url)
+    if not match:
+        return None
+    try:
+        url_artist_id = int(match.group("artist_id"))
+    except (ValueError, KeyError):
+        return None
+    if url_artist_id != expected_artist_id:
+        return None
+    return match.group(1)
+
+
+def _format_band_slug(slug: str) -> str:
+    candidate = slug.strip().lower().replace(" ", "+").replace("-", "+")
+    return re.sub(r"\++", "+", candidate)
 
 
 def _parse_year(value: str) -> Optional[int]:
@@ -132,7 +419,7 @@ def _parse_year(value: str) -> Optional[int]:
 def _extract_rating_info(cell: Optional[Tag]) -> tuple[Optional[float], Optional[int]]:
     if cell is None:
         return None, None
-    rating_text = cell.get_text(strip=True)
+    rating_text = cell.get_text(separator=" ", strip=True)
     if not rating_text:
         return None, None
 
@@ -146,7 +433,7 @@ def _extract_rating_info(cell: Optional[Tag]) -> tuple[Optional[float], Optional
         except ValueError:
             rating = None
 
-    count_match = re.search(r"(\d[\d,]*)\s*ratings", rating_text, re.IGNORECASE)
+    count_match = re.search(r"(\d[\d,]*)\s*(ratings|votes)", rating_text, re.IGNORECASE)
     if count_match:
         digits = count_match.group(1).replace(",", "")
         try:
@@ -162,6 +449,6 @@ def _resolve_art_url(container: Tag, base_url: str) -> Optional[str]:
     if not img:
         return None
     candidate = img.get("data-original") or img.get("data-src") or img.get("src")
-    if not candidate:
+    if not candidate or not isinstance(candidate, str):
         return None
     return urljoin(f"{base_url.rstrip('/')}/", candidate.lstrip("/"))
