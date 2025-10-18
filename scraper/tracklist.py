@@ -53,7 +53,11 @@ def parse_tracklist_html(html: str) -> List[TrackEntry]:
             position = int(position_text)
         except ValueError:
             continue
+        if position <= 0:
+            continue
         normalized_title = title.strip()
+        if not normalized_title:
+            continue
         duration_seconds = _parse_duration(duration_text)
         tracks.append(
             TrackEntry(

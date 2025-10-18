@@ -33,6 +33,7 @@ class DiscographyConfig:
     timeout: float = 20.0
     max_retries: int = 3
     min_interval: float = 1.0
+    burst: int = 1
     fetch_tracklists: bool = True
     fetch_soundoffs: bool = True
     max_soundoffs: Optional[int] = None
@@ -57,6 +58,7 @@ def expand_discographies(
             timeout=config.timeout,
             max_retries=config.max_retries,
             min_interval=config.min_interval,
+            burst=config.burst,
         )
         try:
             while True:
@@ -232,12 +234,25 @@ def _replace_tracklist(
     tracks: List[TrackEntry],
 ) -> None:
     connection.execute("DELETE FROM release_tracks WHERE id_release = ?", (album_id,))
+    normalized_rows = []
+    next_position = 1
+    for track in tracks:
+        title = (track.title or "").strip()
+        if not title:
+            continue
+
+        normalized_rows.append((album_id, next_position, title, track.duration_seconds))
+        next_position += 1
+
+    if not normalized_rows:
+        return
+
     connection.executemany(
         """
         INSERT INTO release_tracks (id_release, track_position, track_title, duration_seconds)
         VALUES (?, ?, ?, ?)
         """,
-        [(album_id, track.position, track.title, track.duration_seconds) for track in tracks],
+        normalized_rows,
     )
 
 
@@ -256,6 +271,11 @@ def _safe_fetch_soundoffs(
 def _persist_soundoffs(connection: sqlite3.Connection, soundoffs: List[SoundoffEntry]) -> None:
     for soundoff in soundoffs:
         _ensure_user_stub(connection, soundoff.user_id, soundoff.user_role)
+        rating: Optional[float]
+        if soundoff.rating is None:
+            rating = None
+        else:
+            rating = max(0.0, min(5.0, soundoff.rating))
         connection.execute(
             """
             INSERT INTO interactions (
@@ -275,7 +295,7 @@ def _persist_soundoffs(connection: sqlite3.Connection, soundoffs: List[SoundoffE
             (
                 soundoff.album_id,
                 soundoff.user_id,
-                soundoff.rating,
+                rating,
                 soundoff.rating_date,
                 soundoff.soundoff_text,
                 soundoff.source_url,
@@ -359,6 +379,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum delay between requests in seconds (default: 1.0)",
     )
     parser.add_argument(
+        "--burst-size",
+        type=int,
+        default=1,
+        help="Number of requests permitted in a burst before rate limiting kicks in (default: 1)",
+    )
+    parser.add_argument(
         "--skip-tracklists",
         action="store_true",
         help="Skip tracklist fetching for each release",
@@ -397,6 +423,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         timeout=args.timeout,
         max_retries=args.max_retries,
         min_interval=args.min_interval,
+        burst=args.burst_size,
         fetch_tracklists=not args.skip_tracklists,
         fetch_soundoffs=not args.skip_soundoffs,
         max_soundoffs=args.max_soundoffs,

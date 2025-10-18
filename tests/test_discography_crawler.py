@@ -164,3 +164,188 @@ def test_expand_discographies_marks_error_when_slug_missing(
 
     assert status == "error"
     assert last_error is not None and "slug" in last_error.lower()
+
+
+def test_expand_discographies_normalizes_duplicate_track_positions(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _discography_stub(
+        artist_id: int,
+        *,
+        artist_slug: str | None = None,
+        client: StubClient | None = None,
+    ) -> List[ArtistReleaseEntry]:
+        assert artist_id == 1
+        return [
+            ArtistReleaseEntry(
+                artist_id=artist_id,
+                release_id=2000,
+                title="Multi Disc",
+                release_type="LP",
+                release_year=2020,
+                art_url=None,
+                avg_rating=None,
+                ratings_count=None,
+                source_url="https://example.com/bands/1/",
+            )
+        ]
+
+    def _tracklist_stub(album_id: int, client: StubClient) -> List[TrackEntry]:
+        assert album_id == 2000
+        return [
+            TrackEntry(position=1, title="Intro", duration_seconds=60),
+            TrackEntry(position=1, title="Disc Two Intro", duration_seconds=90),
+            TrackEntry(position=2, title="Finale", duration_seconds=120),
+        ]
+
+    monkeypatch.setattr("crawler.discography.fetch_artist_discography", _discography_stub)
+    monkeypatch.setattr("crawler.discography.fetch_tracklist", _tracklist_stub)
+    monkeypatch.setattr("crawler.discography.fetch_soundoffs", lambda *args, **kwargs: [])
+
+    expand_discographies(
+        DiscographyConfig(
+            database_path=db_path,
+            schema_path=SCHEMA_PATH,
+            batch_size=1,
+            fetch_tracklists=True,
+            fetch_soundoffs=True,
+        ),
+        client=StubClient(),  # type: ignore[arg-type]
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        track_rows = connection.execute(
+            "SELECT track_position, track_title FROM release_tracks WHERE id_release = ? ORDER BY track_position",
+            (2000,),
+        ).fetchall()
+        assert track_rows == [
+            (1, "Intro"),
+            (2, "Disc Two Intro"),
+            (3, "Finale"),
+        ]
+
+
+def test_client_configuration_respects_min_interval_and_burst(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, float | int] = {}
+
+    class RecordingClient(StubClient):
+        def __init__(
+            self,
+            *,
+            timeout: float,
+            max_retries: int,
+            min_interval: float,
+            burst: int,
+        ) -> None:
+            captured.update(
+                timeout=timeout,
+                max_retries=max_retries,
+                min_interval=min_interval,
+                burst=burst,
+            )
+
+    monkeypatch.setattr("crawler.discography.SputnikClient", RecordingClient)
+    monkeypatch.setattr("crawler.discography.fetch_artist_discography", _fetch_discography)
+    monkeypatch.setattr("crawler.discography.fetch_tracklist", _fetch_tracklist)
+    monkeypatch.setattr("crawler.discography.fetch_soundoffs", _fetch_soundoffs)
+
+    expand_discographies(
+        DiscographyConfig(
+            database_path=db_path,
+            schema_path=SCHEMA_PATH,
+            batch_size=1,
+            timeout=42.0,
+            max_retries=7,
+            min_interval=0.25,
+            burst=5,
+            fetch_tracklists=True,
+            fetch_soundoffs=True,
+        )
+    )
+
+    assert captured == {
+        "timeout": 42.0,
+        "max_retries": 7,
+        "min_interval": 0.25,
+        "burst": 5,
+    }
+
+
+def test_expand_discographies_clamps_out_of_range_ratings(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _discography_stub(
+        artist_id: int,
+        *,
+        artist_slug: str | None = None,
+        client: StubClient | None = None,
+    ) -> List[ArtistReleaseEntry]:
+        assert artist_id == 1
+        return [
+            ArtistReleaseEntry(
+                artist_id=artist_id,
+                release_id=3000,
+                title="Rating Clamp",
+                release_type="LP",
+                release_year=2024,
+                art_url=None,
+                avg_rating=None,
+                ratings_count=None,
+                source_url="https://example.com",
+            )
+        ]
+
+    def _soundoffs_stub(
+        album_id: int,
+        client: StubClient,
+        limit: int | None,
+    ) -> List[SoundoffEntry]:
+        assert album_id == 3000
+        return [
+            SoundoffEntry(
+                album_id=album_id,
+                user_id="low",
+                user_display="Low",
+                user_role=None,
+                rating=-1.0,
+                rating_label="bad",
+                rating_date=None,
+                soundoff_text=None,
+                source_url="https://example.com/low",
+            ),
+            SoundoffEntry(
+                album_id=album_id,
+                user_id="high",
+                user_display="High",
+                user_role=None,
+                rating=6.0,
+                rating_label="great",
+                rating_date=None,
+                soundoff_text=None,
+                source_url="https://example.com/high",
+            ),
+        ]
+
+    monkeypatch.setattr("crawler.discography.fetch_artist_discography", _discography_stub)
+    monkeypatch.setattr("crawler.discography.fetch_tracklist", _fetch_tracklist)
+    monkeypatch.setattr("crawler.discography.fetch_soundoffs", _soundoffs_stub)
+
+    expand_discographies(
+        DiscographyConfig(
+            database_path=db_path,
+            schema_path=SCHEMA_PATH,
+            batch_size=1,
+            fetch_tracklists=True,
+            fetch_soundoffs=True,
+        ),
+        client=StubClient(),  # type: ignore[arg-type]
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT id_user, rating FROM interactions WHERE id_release = ? ORDER BY id_user",
+            (3000,),
+        ).fetchall()
+        assert rows == [("high", 5.0), ("low", 0.0)]
