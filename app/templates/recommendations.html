@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Recomendaciones para {{ user_id }}</title>
+</head>
+<body class="px-6 py-4 bg-slate-50 min-h-screen">
+    <div class="flex flex-wrap items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold text-slate-800">Recomendaciones de discos para {{ user_id }}</h1>
+        <div class="text-sm text-slate-600">
+            {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
+            <a href="/reset" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">limpiar historial</a>
+        </div>
+    </div>
+
+    {% if releases %}
+    <form method="post" action="/recomendaciones" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {% for release in releases %}
+            <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
+                <img src="{{ release.art_url or 'https://via.placeholder.com/200x200?text=Album' }}" alt="Arte de tapa" class="w-36 h-36 object-cover flex-none" />
+                <div class="p-4 flex flex-col gap-2 flex-1">
+                    <h2 class="text-lg font-semibold text-slate-800">
+                        <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
+                    </h2>
+                    <p class="text-sm text-slate-600">{{ release.artist_name }}{% if release.release_year %} &middot; {{ release.release_year }}{% endif %}</p>
+                    {% if release.avg_rating %}
+                    <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
+                    {% endif %}
+                    <div class="mt-auto flex items-center gap-2">
+                        <label for="release-{{ release.id_release }}" class="text-sm text-slate-700">Mi puntaje:</label>
+                        <select id="release-{{ release.id_release }}" name="{{ release.id_release }}" class="px-3 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                            <option value="" selected></option>
+                            <option value="0.5">0.5</option>
+                            <option value="1.0">1.0</option>
+                            <option value="1.5">1.5</option>
+                            <option value="2.0">2.0</option>
+                            <option value="2.5">2.5</option>
+                            <option value="3.0">3.0</option>
+                            <option value="3.5">3.5</option>
+                            <option value="4.0">4.0</option>
+                            <option value="4.5">4.5</option>
+                            <option value="5.0">5.0</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="flex justify-end">
+            <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Guardar y recargar</button>
+        </div>
+    </form>
+    {% else %}
+    <div class="p-6 bg-white border rounded text-slate-600">No encontramos discos nuevos para recomendar. Prob&aacute; limpiar tu historial.</div>
+    {% endif %}
+</body>
+</html>

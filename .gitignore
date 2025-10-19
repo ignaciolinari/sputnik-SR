@@ -11,3 +11,4 @@ __pycache__/
 data/backup/
 logs/
 .ruff_cache/
+.vscode/

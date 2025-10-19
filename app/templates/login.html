@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Ingreso al sistema de recomendaciones</title>
+</head>
+<body class="px-12 py-4 bg-slate-50 min-h-screen">
+    <form method="post" class="w-full max-w-md border shadow-xl mx-auto mt-10 p-6 bg-white rounded-lg">
+        <h1 class="mb-4 text-2xl font-bold text-slate-800">Bienvenido</h1>
+        <p class="mb-6 text-sm text-slate-600">Ingres&aacute; tu usuario para obtener recomendaciones de discos.</p>
+        {% if error %}
+        <div class="mb-4 p-2 bg-red-100 text-red-700 rounded">{{ error }}</div>
+        {% endif %}
+        <label class="flex flex-col gap-2 mb-6 text-sm text-slate-700">
+            Usuario
+            <input type="text" name="id_usuario" minlength="5" maxlength="40" required class="p-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500" placeholder="Al menos 5 caracteres" />
+        </label>
+        <div class="flex justify-end">
+            <button type="submit" class="border bg-teal-500 hover:bg-teal-600 text-white text-lg font-semibold px-5 py-2 rounded">Entrar</button>
+        </div>
+    </form>
+</body>
+</html>
