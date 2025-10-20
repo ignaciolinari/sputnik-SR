@@ -74,6 +74,19 @@ SAMPLE_USER_HTML = """
 """
 
 
+SAMPLE_USER_HTML_WITH_MEMBER_ID = """
+<html><body>
+<font size="6">Beta User</font>
+<a href="/uservote.php?memberid=98765">Ratings</a>
+<table>
+  <tr>
+    <td><font class="category">Album Ratings</font> <font class="normal">12</font></td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
 def test_parse_soundoff_page_extracts_entries() -> None:
     entries = parse_soundoff_page(
         SAMPLE_SOUNDOFF_HTML,
@@ -113,6 +126,7 @@ def test_parse_user_profile_normalizes_fields() -> None:
     assert profile.join_date == "2010-04-01"
     assert profile.last_active == "2024-05-03T23:45:00"
     assert profile.role is None
+    assert profile.member_id is None
 
 
 def test_parse_soundoff_page_detects_user_role() -> None:
@@ -124,3 +138,10 @@ def test_parse_soundoff_page_detects_user_role() -> None:
     assert len(entries) == 1
     assert entries[0].user_role == "EMERITUS"
     assert entries[0].user_display == "Frippertronics"
+
+
+def test_parse_user_profile_extracts_member_id() -> None:
+    profile = parse_user_profile(SAMPLE_USER_HTML_WITH_MEMBER_ID, user_id="beta")
+    assert profile is not None
+    assert profile.member_id == "98765"
+    assert profile.ratings_count == 12

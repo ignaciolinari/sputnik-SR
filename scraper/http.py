@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import threading
 import time
@@ -17,6 +18,12 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - certifi should be available via requests, but guard anyway
+    certifi = None
 from requests import RequestException
 from requests import Response
 
@@ -87,6 +94,7 @@ class SputnikClient:
         user_agents: Optional[Iterable[str]] = None,
         rotate_user_agents: bool = True,
         observer: Optional[Callable[[RequestAttemptEvent], None]] = None,
+        verify: Optional[bool | str] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -119,6 +127,8 @@ class SputnikClient:
         self._user_agent_cycle = cycle(resolved_agents)
         self._ua_lock = threading.Lock()
         self._observer = observer
+        self._verify = self._resolve_verify_setting(verify)
+        self.session.verify = self._verify
 
         self._ensure_headers(headers)
 
@@ -183,6 +193,24 @@ class SputnikClient:
         if headers:
             for key, value in headers.items():
                 combined_headers[key] = value
+
+    def _resolve_verify_setting(self, verify: Optional[bool | str]) -> bool | str:
+        env_flag = os.environ.get("SPUTNIK_ALLOW_INSECURE_SSL")
+        if env_flag and env_flag not in {"0", "false", "False", ""}:
+            if self.logger:
+                self.logger.warning(
+                    "SSL certificate verification disabled due to SPUTNIK_ALLOW_INSECURE_SSL=%s",
+                    env_flag,
+                )
+            return False
+
+        if verify is not None:
+            return verify
+
+        if certifi is not None:
+            return certifi.where()
+
+        return True
 
     def _request_with_retries(
         self,

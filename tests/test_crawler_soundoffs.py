@@ -80,7 +80,7 @@ def test_persist_soundoffs_enqueues_user_when_profiles_disabled() -> None:
     _persist_soundoffs(
         connection,
         [_make_soundoff("user-alpha", role="EMERITUS")],
-        DummyClient(),
+        DummyClient(),  # type: ignore[arg-type]
         processed,
         config=config,
     )
@@ -123,6 +123,7 @@ def test_persist_soundoffs_marks_queue_done_when_profile_available(
         soundoffs=15,
         ratings_count=30,
         objectivity_score=87.5,
+        member_id=None,
     )
 
     def fake_fetch(user_id: str, client: object) -> UserProfile:
@@ -137,7 +138,7 @@ def test_persist_soundoffs_marks_queue_done_when_profile_available(
     _persist_soundoffs(
         connection,
         [_make_soundoff("user-beta")],
-        DummyClient(),
+        DummyClient(),  # type: ignore[arg-type]
         processed,
         config=config,
     )

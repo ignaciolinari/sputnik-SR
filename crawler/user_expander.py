@@ -40,6 +40,7 @@ class ExpansionConfig:
     timeout: float = 20.0
     max_retries: int = 3
     min_interval: float = 1.0
+    burst: int = 1
     fetch_profiles: bool = True
     max_rating_pages: Optional[int] = None
 
@@ -54,6 +55,7 @@ class RatingsFetcher(Protocol):
         user_id: str,
         *,
         client: SputnikClient,
+        member_id: Optional[str],
         max_pages: Optional[int],
     ) -> List[UserRatingEntry]: ...
 
@@ -79,7 +81,9 @@ def expand_users(
             timeout=config.timeout,
             max_retries=config.max_retries,
             min_interval=config.min_interval,
+            burst=config.burst,
         )
+        artist_cache: dict[str, int] = {}
         try:
             while True:
                 pending_users = _claim_users(connection, config.batch_size)
@@ -96,6 +100,7 @@ def expand_users(
                             config=config,
                             profile_fetcher=profile_fetcher,
                             ratings_fetcher=ratings_fetcher,
+                            artist_cache=artist_cache,
                         )
                         _mark_user_done(connection, user_id)
                     except Exception as exc:  # pragma: no cover - defensive logging
@@ -162,16 +167,26 @@ def _process_user(
     config: ExpansionConfig,
     profile_fetcher: ProfileFetcher,
     ratings_fetcher: RatingsFetcher,
+    artist_cache: Optional[dict[str, int]] = None,
 ) -> None:
     LOGGER.info("Processing user %s", user_id)
     if config.fetch_profiles:
         profile = profile_fetcher(user_id, client=client)
         if profile:
+            member_id = profile.member_id
             _upsert_user_profile(connection, profile)
+        else:
+            member_id = None
+    else:
+        member_id = None
+
+    if member_id is None:
+        member_id = _lookup_member_id(connection, user_id)
 
     rating_entries = ratings_fetcher(
         user_id,
         client=client,
+        member_id=member_id,
         max_pages=config.max_rating_pages,
     )
     if not rating_entries:
@@ -179,7 +194,7 @@ def _process_user(
         return
 
     for entry in rating_entries:
-        artist_id = _ensure_artist(connection, entry.artist_name)
+        artist_id = _ensure_artist(connection, entry.artist_name, cache=artist_cache)
         _ensure_release_stub(connection, entry, artist_id)
         _upsert_rating_interaction(connection, entry)
 
@@ -218,15 +233,17 @@ def _upsert_user_profile(connection: sqlite3.Connection, profile: UserProfile) -
             last_active,
             objectivity_score,
             soundoffs,
-            ratings_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ratings_count,
+            member_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id_user) DO UPDATE SET
             join_date=COALESCE(excluded.join_date, users.join_date),
             last_active=COALESCE(excluded.last_active, users.last_active),
             objectivity_score=COALESCE(excluded.objectivity_score, users.objectivity_score),
             soundoffs=COALESCE(excluded.soundoffs, users.soundoffs),
             ratings_count=COALESCE(excluded.ratings_count, users.ratings_count),
-            role=COALESCE(excluded.role, users.role)
+            role=COALESCE(excluded.role, users.role),
+            member_id=COALESCE(excluded.member_id, users.member_id)
         """,
         (
             profile.user_id,
@@ -236,27 +253,61 @@ def _upsert_user_profile(connection: sqlite3.Connection, profile: UserProfile) -
             profile.objectivity_score,
             profile.soundoffs,
             profile.ratings_count,
+            profile.member_id,
         ),
     )
 
 
-def _ensure_artist(connection: sqlite3.Connection, artist_name: str) -> int:
+def _lookup_member_id(connection: sqlite3.Connection, user_id: str) -> Optional[str]:
+    cursor = connection.execute(
+        "SELECT member_id FROM users WHERE id_user = ?",
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    value = row[0]
+    if value is None:
+        return None
+    return str(value)
+
+
+def _ensure_artist(
+    connection: sqlite3.Connection,
+    artist_name: str,
+    *,
+    cache: Optional[dict[str, int]] = None,
+) -> int:
+    normalized_name = artist_name.strip()
+    lookup_name = normalized_name or artist_name
+    cache_key = lookup_name.casefold() if lookup_name else ""
+    if cache is not None:
+        cached_id = cache.get(cache_key)
+        if cached_id is not None:
+            return cached_id
+
     cursor = connection.execute(
         "SELECT id_artist FROM artists WHERE name = ?",
-        (artist_name,),
+        (lookup_name,),
     )
     row = cursor.fetchone()
     if row:
-        return int(row[0])
+        artist_id = int(row[0])
+        if cache is not None:
+            cache[cache_key] = artist_id
+        return artist_id
 
     cursor = connection.execute(
         "INSERT INTO artists (name) VALUES (?)",
-        (artist_name,),
+        (lookup_name,),
     )
     new_id = cursor.lastrowid
     if new_id is None:  # pragma: no cover - SQLite should always set lastrowid
         raise RuntimeError("Failed to retrieve lastrowid for newly inserted artist")
-    return int(new_id)
+    artist_id = int(new_id)
+    if cache is not None:
+        cache[cache_key] = artist_id
+    return artist_id
 
 
 def _ensure_release_stub(
@@ -366,6 +417,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum delay between requests in seconds (default: 1.0)",
     )
     parser.add_argument(
+        "--burst-size",
+        type=int,
+        default=1,
+        help="Number of requests permitted in a burst before rate limiting kicks in (default: 1)",
+    )
+    parser.add_argument(
         "--max-rating-pages",
         type=_parse_optional_int,
         help="Optional cap on rating pages per user (accepts integer or 'none')",
@@ -399,6 +456,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         timeout=args.timeout,
         max_retries=args.max_retries,
         min_interval=args.min_interval,
+        burst=args.burst_size,
         fetch_profiles=not args.skip_profiles,
         max_rating_pages=args.max_rating_pages,
     )

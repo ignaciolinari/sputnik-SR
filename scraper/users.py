@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
@@ -29,26 +30,28 @@ class UserProfile:
     soundoffs: Optional[int]
     ratings_count: Optional[int]
     objectivity_score: Optional[float]
+    member_id: Optional[str]
 
 
 def fetch_user_profile(user_id: str, *, client: SputnikClient) -> Optional[UserProfile]:
     """Retrieve and parse a user's public profile."""
 
-    response = client.get(f"/user/{user_id}/")
+    response = client.get(f"/user/{user_id}")
     return parse_user_profile(response.text, user_id=user_id)
 
 
 def parse_user_profile(html: str, *, user_id: str) -> Optional[UserProfile]:
     soup = BeautifulSoup(html, "html.parser")
 
-    name_font = soup.find("font", size="6")
-    display_name = name_font.get_text(strip=True) if name_font else user_id
+    display_name = _extract_display_name(soup, fallback=user_id)
     role = _extract_role(soup)
 
     stats = {
         font.get_text(strip=True): _extract_stat_value(font)
         for font in soup.select("font.category")
     }
+
+    member_id = _extract_member_id(soup)
 
     join_date = _normalize_date(stats.get("Joined"))
     last_active = _normalize_datetime(stats.get("Last Active"))
@@ -65,7 +68,38 @@ def parse_user_profile(html: str, *, user_id: str) -> Optional[UserProfile]:
         soundoffs=soundoffs,
         ratings_count=ratings_count,
         objectivity_score=objectivity,
+        member_id=member_id,
     )
+
+
+def _extract_display_name(soup: BeautifulSoup, fallback: str) -> str:
+    name_font = soup.find("font", size=lambda value: value in {"6", "7"})
+    if name_font:
+        return name_font.get_text(strip=True)
+
+    title = soup.find("title")
+    if title and title.string:
+        text = title.string.strip()
+        if "|" in text:
+            candidate = text.split("|", 1)[0].strip()
+            if candidate:
+                return candidate
+        if text:
+            return text
+
+    return fallback
+
+
+def _extract_member_id(soup: BeautifulSoup) -> Optional[str]:
+    ratings_link = soup.select_one('a[href*="uservote.php?memberid="]')
+    if ratings_link is None:
+        return None
+
+    href = str(ratings_link.get("href") or "")
+    match = re.search(r"memberid=(\d+)", href)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def _extract_stat_value(category_font) -> Optional[str]:

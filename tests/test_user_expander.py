@@ -50,12 +50,14 @@ def _profile_fetcher(user_id: str, client: StubClient) -> Optional[UserProfile]:
         soundoffs=10,
         ratings_count=20,
         objectivity_score=75.0,
+        member_id="4242",
     )
 
 
 def _ratings_fetcher(
-    user_id: str, client: StubClient, max_pages: Optional[int]
+    user_id: str, client: StubClient, member_id: Optional[str], max_pages: Optional[int]
 ) -> List[UserRatingEntry]:
+    assert member_id == "4242"
     return [
         UserRatingEntry(
             user_id=user_id,
@@ -104,10 +106,10 @@ def test_expand_users_updates_profiles_and_interactions(db_path: Path) -> None:
 
     with sqlite3.connect(db_path) as connection:
         user_row = connection.execute(
-            "SELECT role, join_date, ratings_count FROM users WHERE id_user = ?",
+            "SELECT role, join_date, ratings_count, member_id FROM users WHERE id_user = ?",
             ("test-user",),
         ).fetchone()
-        assert user_row == ("USER", "2020-01-01", 20)
+        assert user_row == ("USER", "2020-01-01", 20, "4242")
 
         release_rows = connection.execute(
             "SELECT title, artist_id FROM releases WHERE id_release IN (100, 200) ORDER BY id_release",

@@ -590,15 +590,17 @@ def _upsert_user(
             last_active,
             objectivity_score,
             soundoffs,
-            ratings_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ratings_count,
+            member_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id_user) DO UPDATE SET
             join_date=COALESCE(excluded.join_date, users.join_date),
             last_active=COALESCE(excluded.last_active, users.last_active),
             objectivity_score=COALESCE(excluded.objectivity_score, users.objectivity_score),
             soundoffs=COALESCE(excluded.soundoffs, users.soundoffs),
             ratings_count=COALESCE(excluded.ratings_count, users.ratings_count),
-            role=COALESCE(excluded.role, users.role)
+            role=COALESCE(excluded.role, users.role),
+            member_id=COALESCE(excluded.member_id, users.member_id)
         """,
         (
             profile.user_id,
@@ -608,6 +610,7 @@ def _upsert_user(
             profile.objectivity_score,
             profile.soundoffs,
             profile.ratings_count,
+            profile.member_id,
         ),
     )
 

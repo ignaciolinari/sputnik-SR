@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_active       TEXT,
     objectivity_score NUMERIC CHECK (objectivity_score BETWEEN 0 AND 100),
     soundoffs         INTEGER DEFAULT 0 CHECK (soundoffs >= 0),
-    ratings_count     INTEGER DEFAULT 0 CHECK (ratings_count >= 0)
+    ratings_count     INTEGER DEFAULT 0 CHECK (ratings_count >= 0),
+    member_id         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artists (
@@ -19,6 +20,8 @@ CREATE TABLE IF NOT EXISTS artists (
     country   TEXT,
     bio       TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name);
 
 CREATE TABLE IF NOT EXISTS releases (
     id_release    INTEGER PRIMARY KEY,

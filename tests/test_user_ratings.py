@@ -133,18 +133,18 @@ def test_parse_user_ratings_page_extracts_entries_and_pagination() -> None:
 def test_fetch_user_ratings_stops_when_no_more_pages() -> None:
     client = DummyClient()
     client.queue_response(
-        "https://example.com/uservote.php?memberid=tester",
+        "https://example.com/uservote.php?memberid=42&user=tester",
         SAMPLE_USER_VOTES_HTML,
     )
     client.queue_response(
-        "https://example.com/uservote.php?memberid=tester&page=2",
+        "https://example.com/uservote.php?memberid=42&user=tester&page=2",
         SINGLE_PAGE_USER_VOTES_HTML,
     )
 
-    entries = fetch_user_ratings("tester", client=client)  # type: ignore[arg-type]
+    entries = fetch_user_ratings("tester", client=client, member_id="42")  # type: ignore[arg-type]
     assert len(entries) == 4
     assert [entry.release_id for entry in entries] == [123, 456, 789, 999]
     assert client.calls == [
-        ("/uservote.php", {"memberid": "tester"}),
-        ("/uservote.php", {"memberid": "tester", "page": "2"}),
+        ("/uservote.php", {"memberid": "42", "user": "tester"}),
+        ("/uservote.php", {"memberid": "42", "user": "tester", "page": "2"}),
     ]

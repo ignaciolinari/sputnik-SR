@@ -33,17 +33,25 @@ def fetch_user_ratings(
     user_id: str,
     *,
     client: SputnikClient,
+    member_id: Optional[str] = None,
     max_pages: Optional[int] = None,
 ) -> List[UserRatingEntry]:
+    if member_id is None:
+        LOGGER.info("Skipping ratings fetch for %s due to missing member_id", user_id)
+        return []
+
     page = 1
     results: List[UserRatingEntry] = []
 
     while True:
-        params = {"memberid": user_id}
+        params = {"memberid": member_id, "user": user_id}
         if page > 1:
             params["page"] = str(page)
 
         response = client.get("/uservote.php", params=params)
+        if "Bad URL" in response.text:
+            LOGGER.debug("uservote.php rejected user %s with 'Bad URL' message", user_id)
+            break
         page_entries, has_more = parse_user_ratings_page(
             response.text,
             user_id=user_id,

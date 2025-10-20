@@ -3,6 +3,10 @@ set -euo pipefail
 
 DB_PATH=${1:-data/sputnik.db}
 LOG_PATH=${2:-logs/crawler-full.log}
+LOG_DIR=${LOG_DIR:-logs}
+SEED_LOG=${SEED_LOG:-${LOG_DIR}/seed_charts_latest.log}
+DISC_LOG=${DISC_LOG:-${LOG_DIR}/expand_discographies_latest.log}
+USERS_LOG=${USERS_LOG:-${LOG_DIR}/expand_users_latest.log}
 REFRESH_INTERVAL=${REFRESH_INTERVAL:-30}
 
 # Crear directorio de logs si no existe
@@ -15,6 +19,22 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 fi
 
 trap 'echo; echo "Stopping monitor"; exit 0' INT TERM
+
+# Helper to summarize log files
+print_log_summary() {
+  local label=$1
+  local path=$2
+
+  echo "${label}:"
+  if [[ -f "${path}" ]]; then
+    echo "  Archivo: ${path}"
+    echo "  Últimas 5 líneas:"
+    tail -n 5 "${path}" | sed 's/^/    /'
+  else
+    echo "  Log no encontrado."
+  fi
+  echo
+}
 
 # Función para mostrar el menú principal
 show_menu() {
@@ -40,9 +60,10 @@ show_menu() {
   echo "2) Ver progreso de carga de datos"
   echo "3) Ver estadísticas de la base de datos"
   echo "4) Ver estado de colas de expansión"
-  echo "5) Ver todo (modo automático)"
-  echo "6) Ver errores recientes"
-  echo "7) Salir"
+  echo "5) Ver resumen del pipeline"
+  echo "6) Ver todo (modo automático)"
+  echo "7) Ver errores recientes"
+  echo "8) Salir"
   echo
 }
 
@@ -385,6 +406,58 @@ SQL
   read -p "Presiona Enter para continuar..."
 }
 
+show_pipeline_overview() {
+  echo "=== Resumen del Pipeline ==="
+  echo
+  show_processes
+
+  if [[ -f "${DB_PATH}" ]]; then
+    echo "Fase 1 – Seed charts:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Años totales: ' || COUNT(*) FROM crawl_state;
+SELECT '  Años completados: ' || SUM(CASE WHEN status IN ('DONE','done') THEN 1 ELSE 0 END) FROM crawl_state;
+SELECT '  Años con trabajo pendiente: ' || SUM(CASE WHEN status IN ('PENDING','IN_PROGRESS','pending','seeded','processing') THEN 1 ELSE 0 END) FROM crawl_state;
+SELECT '  Años con error: ' || SUM(CASE WHEN status IN ('ERROR','error') THEN 1 ELSE 0 END) FROM crawl_state;
+SQL
+    echo
+    echo "Fase 2 – Discografías:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Artistas pendientes: ' || COUNT(*) FROM crawl_artists WHERE status = 'pending';
+SELECT '  Artistas en proceso: ' || COUNT(*) FROM crawl_artists WHERE status = 'processing';
+SELECT '  Artistas con error: ' || COUNT(*) FROM crawl_artists WHERE status = 'error';
+SELECT '  Releases pendientes: ' || COUNT(*) FROM crawl_releases WHERE status IN ('pending','seeded');
+SELECT '  Releases en proceso: ' || COUNT(*) FROM crawl_releases WHERE status = 'processing';
+SELECT '  Releases con error: ' || COUNT(*) FROM crawl_releases WHERE status = 'error';
+SQL
+    echo
+    echo "Fase 3 – Expansión de usuarios:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Usuarios pendientes: ' || COUNT(*) FROM crawl_users WHERE status = 'pending';
+SELECT '  Usuarios en proceso: ' || COUNT(*) FROM crawl_users WHERE status = 'processing';
+SELECT '  Usuarios completados: ' || COUNT(*) FROM crawl_users WHERE status = 'done';
+SELECT '  Usuarios con error: ' || COUNT(*) FROM crawl_users WHERE status = 'error';
+SELECT '  Ratings totales: ' || COUNT(*) FROM interactions;
+SQL
+  else
+    echo "Base de datos no encontrada en ${DB_PATH}"
+  fi
+
+  echo
+  echo "Logs recientes:"
+  print_log_summary "  Fase 1 (seed_charts)" "${SEED_LOG}"
+  print_log_summary "  Fase 2 (expand_discographies)" "${DISC_LOG}"
+  print_log_summary "  Fase 3 (expand_users)" "${USERS_LOG}"
+  print_log_summary "  Crawler general" "${LOG_PATH}"
+
+  read -p "Presiona Enter para continuar..."
+}
+
 # Función para el modo automático (como el original)
 auto_mode() {
   while true; do
@@ -441,12 +514,15 @@ while true; do
       show_queues
       ;;
     5)
-      auto_mode
+      show_pipeline_overview
       ;;
     6)
-      show_recent_errors
+      auto_mode
       ;;
     7)
+      show_recent_errors
+      ;;
+    8)
       echo "¡Hasta luego!"
       exit 0
       ;;
