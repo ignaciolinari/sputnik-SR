@@ -47,13 +47,14 @@ SAMPLE_DISCOGRAPHY_HTML = """
 
 
 def test_parse_artist_discography_extracts_releases() -> None:
-    entries = parse_artist_discography(
+    page = parse_artist_discography(
         SAMPLE_DISCOGRAPHY_HTML,
         artist_id=1,
         source_url="https://example.com/bands/1/",
         base_url="https://example.com",
     )
 
+    entries = page.releases
     assert len(entries) == 2
 
     first = entries[0]
@@ -72,3 +73,28 @@ def test_parse_artist_discography_extracts_releases() -> None:
     assert second.avg_rating == 3.5
     assert second.ratings_count == 45
     assert second.art_url == "https://example.com/images/albums/456.jpg-thumbl"
+
+
+def test_parse_artist_discography_extracts_genres() -> None:
+    html = """
+    <html>
+      <body>
+        <div class="tagwrap">
+          <ul class="tags">
+            <li class="tag"><a href="/genre/1/rock/">Rock</a></li>
+            <li class="tag"><a href="/genre/1/rock/">Rock</a></li>
+            <li class="tag"><a href="/genre/2/pop/">Pop</a></li>
+          </ul>
+        </div>
+      </body>
+    </html>
+    """
+
+    page = parse_artist_discography(
+        html,
+        artist_id=10,
+        source_url="https://example.com/bands/10/",
+        base_url="https://example.com",
+    )
+
+    assert page.genres == ["Rock", "Pop"]

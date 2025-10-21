@@ -65,12 +65,20 @@ class ArtistReleaseEntry:
     source_url: str
 
 
+@dataclass(slots=True)
+class ArtistDiscographyPage:
+    artist_id: int
+    source_url: str
+    releases: List[ArtistReleaseEntry]
+    genres: List[str]
+
+
 def fetch_artist_discography(
     artist_id: int,
     *,
     artist_slug: Optional[str] = None,
     client: Optional[SputnikClient] = None,
-) -> List[ArtistReleaseEntry]:
+) -> ArtistDiscographyPage:
     owns_client = client is None
     active_client = client or SputnikClient()
     try:
@@ -82,14 +90,27 @@ def fetch_artist_discography(
                 initial_response = active_client.get(f"/bands/{artist_id}/")
             except TooManyRedirects:
                 LOGGER.warning("Too many redirects while resolving slug for artist %s", artist_id)
-                return []
+                return ArtistDiscographyPage(
+                    artist_id=artist_id,
+                    source_url=urljoin(
+                        f"{active_client.base_url.rstrip('/')}/", f"bands/{artist_id}/"
+                    ),
+                    releases=[],
+                    genres=[],
+                )
 
             slug_from_url = _extract_artist_slug(initial_response.url, artist_id)
             if not slug_from_url:
                 LOGGER.warning("Artist %s has no slug; discography fetch skipped", artist_id)
-                return []
+                return ArtistDiscographyPage(
+                    artist_id=artist_id,
+                    source_url=initial_response.url,
+                    releases=[],
+                    genres=[],
+                )
             candidate_slugs.append(slug_from_url)
 
+        last_page: Optional[ArtistDiscographyPage] = None
         for slug in candidate_slugs:
             band_path = f"/band/{_format_band_slug(slug)}"
             try:
@@ -100,14 +121,15 @@ def fetch_artist_discography(
                 )
                 response = None
             else:
-                releases = parse_artist_discography(
+                page = parse_artist_discography(
                     response.text,
                     artist_id=artist_id,
                     source_url=response.url,
                     base_url=active_client.base_url,
                 )
-                if releases:
-                    return releases
+                last_page = page
+                if page.releases or page.genres:
+                    return page
 
             legacy_path = f"/bands/{slug}/{artist_id}/?page=releases"
             try:
@@ -118,17 +140,25 @@ def fetch_artist_discography(
                 )
                 continue
 
-            releases = parse_artist_discography(
+            page = parse_artist_discography(
                 response.text,
                 artist_id=artist_id,
                 source_url=response.url,
                 base_url=active_client.base_url,
             )
-            if releases:
-                return releases
+            last_page = page
+            if page.releases or page.genres:
+                return page
 
         LOGGER.debug("No discography parsed for artist %s after all attempts", artist_id)
-        return []
+        if last_page is not None:
+            return last_page
+        return ArtistDiscographyPage(
+            artist_id=artist_id,
+            source_url=urljoin(f"{active_client.base_url.rstrip('/')}/", f"bands/{artist_id}/"),
+            releases=[],
+            genres=[],
+        )
     finally:
         if owns_client:
             active_client.close()
@@ -140,17 +170,24 @@ def parse_artist_discography(
     artist_id: int,
     source_url: str,
     base_url: str = DEFAULT_BASE_URL,
-) -> List[ArtistReleaseEntry]:
+) -> ArtistDiscographyPage:
     soup = BeautifulSoup(html, "html.parser")
     releases: List[ArtistReleaseEntry] = []
+    genres = _extract_artist_genres(soup)
 
     table = soup.find("table", class_="discog")
     if table is not None:
-        return _parse_legacy_discography_table(
+        releases = _parse_legacy_discography_table(
             table,
             artist_id=artist_id,
             source_url=source_url,
             base_url=base_url,
+        )
+        return ArtistDiscographyPage(
+            artist_id=artist_id,
+            source_url=source_url,
+            releases=releases,
+            genres=genres,
         )
 
     container = soup.find("table", class_="plaincontentbox")
@@ -162,14 +199,61 @@ def parse_artist_discography(
             base_url=base_url,
         )
         if releases:
-            return releases
+            return ArtistDiscographyPage(
+                artist_id=artist_id,
+                source_url=source_url,
+                releases=releases,
+                genres=genres,
+            )
 
-    return _parse_modern_discography(
+    releases = _parse_modern_discography(
         soup,
         artist_id=artist_id,
         source_url=source_url,
         base_url=base_url,
     )
+
+    return ArtistDiscographyPage(
+        artist_id=artist_id,
+        source_url=source_url,
+        releases=releases,
+        genres=genres,
+    )
+
+
+def _extract_artist_genres(soup: BeautifulSoup) -> List[str]:
+    genres: List[str] = []
+    seen: set[str] = set()
+
+    for anchor in soup.select("div.tagwrap ul.tags li.tag a"):
+        text = anchor.get_text(strip=True)
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        genres.append(text)
+
+    if genres:
+        return genres
+
+    container = soup.find("div", class_="tagwrap")
+    if container is None:
+        return []
+
+    raw_text = container.get_text(" ", strip=True)
+    for token in re.split(r"[,/]|\s{2,}|\u2022", raw_text):
+        cleaned = token.strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        genres.append(cleaned)
+
+    return genres
 
 
 def _parse_legacy_discography_table(

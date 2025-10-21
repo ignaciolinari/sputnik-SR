@@ -137,16 +137,20 @@ def _process_artist(
     artist_slug = _lookup_artist_slug(connection, artist_id)
     if not artist_slug:
         raise RuntimeError(f"Missing slug for artist {artist_id}; cannot fetch discography")
-    releases = fetch_artist_discography(
+    page = fetch_artist_discography(
         artist_id,
         artist_slug=artist_slug,
         client=client,
     )
-    if not releases:
+
+    if page.genres:
+        _replace_artist_genres(connection, artist_id, page.genres)
+
+    if not page.releases:
         LOGGER.debug("No releases found for artist %s", artist_id)
         return
 
-    for entry in releases:
+    for entry in page.releases:
         _upsert_release(connection, entry)
         if config.fetch_tracklists:
             tracks = _safe_fetch_tracklist(entry.release_id, client)
@@ -334,6 +338,66 @@ def _slugify_artist_name(name: str) -> str:
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^A-Za-z0-9]+", "-", ascii_only).strip("-")
     return slug or name.replace(" ", "-")
+
+
+def _replace_artist_genres(
+    connection: sqlite3.Connection, artist_id: int, genres: List[str]
+) -> None:
+    normalized = []
+    seen: set[str] = set()
+    for genre in genres:
+        cleaned = (genre or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned)
+
+    if not normalized:
+        return
+
+    genre_ids: list[int] = []
+    for name in normalized:
+        connection.execute(
+            """
+            INSERT INTO genres (name)
+            VALUES (?)
+            ON CONFLICT(name) DO NOTHING
+            """,
+            (name,),
+        )
+        # Re-query to avoid relying on lastrowid after ON CONFLICT DO NOTHING.
+        row = connection.execute(
+            "SELECT id_genre FROM genres WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Failed to resolve genre id for '{name}'")
+        genre_ids.append(int(row[0]))
+
+    existing_rows = connection.execute(
+        "SELECT id_genre FROM artist_genres WHERE id_artist = ?",
+        (artist_id,),
+    ).fetchall()
+    existing_ids = {int(row[0]) for row in existing_rows}
+    target_ids = set(genre_ids)
+
+    to_insert = [(artist_id, gid) for gid in target_ids - existing_ids]
+    to_delete = [(artist_id, gid) for gid in existing_ids - target_ids]
+
+    if to_insert:
+        connection.executemany(
+            "INSERT INTO artist_genres (id_artist, id_genre) VALUES (?, ?)",
+            to_insert,
+        )
+
+    if to_delete:
+        connection.executemany(
+            "DELETE FROM artist_genres WHERE id_artist = ? AND id_genre = ?",
+            to_delete,
+        )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

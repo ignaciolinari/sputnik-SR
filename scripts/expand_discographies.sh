@@ -25,7 +25,10 @@ ARGS=(
     --min-interval "${MIN_INTERVAL}"
     --burst-size "${BURST_SIZE}"
     --log-level "${LOG_LEVEL}"
+    --skip-tracklists
 )
+
+: "${MAX_SOUNDOFFS:=}"
 
 if [ -n "${MAX_SOUNDOFFS}" ]; then
     ARGS+=(--max-soundoffs "${MAX_SOUNDOFFS}")

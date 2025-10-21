@@ -3,6 +3,7 @@
 from .charts import ChartEntry
 from .charts import fetch_best_albums
 from .charts import parse_best_album_chart
+from .discography import ArtistDiscographyPage
 from .discography import ArtistReleaseEntry
 from .discography import fetch_artist_discography
 from .discography import parse_artist_discography
@@ -37,6 +38,7 @@ __all__ = [
     "fetch_user_ratings",
     "parse_user_ratings_page",
     "ArtistReleaseEntry",
+    "ArtistDiscographyPage",
     "fetch_artist_discography",
     "parse_artist_discography",
 ]

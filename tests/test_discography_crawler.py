@@ -9,6 +9,7 @@ import pytest  # type: ignore[import]
 
 from crawler.discography import DiscographyConfig
 from crawler.discography import expand_discographies
+from scraper.discography import ArtistDiscographyPage
 from scraper.discography import ArtistReleaseEntry
 from scraper.soundoffs import SoundoffEntry
 from scraper.tracklist import TrackEntry
@@ -45,21 +46,26 @@ def _fetch_discography(
     *,
     artist_slug: str | None = None,
     client: StubClient | None = None,
-) -> List[ArtistReleaseEntry]:
+) -> ArtistDiscographyPage:
     assert artist_id == 1
-    return [
-        ArtistReleaseEntry(
-            artist_id=artist_id,
-            release_id=1000,
-            title="New Release",
-            release_type="LP",
-            release_year=2024,
-            art_url="https://example.com/1000.jpg",
-            avg_rating=4.2,
-            ratings_count=50,
-            source_url="https://example.com/bands/1/",
-        )
-    ]
+    return ArtistDiscographyPage(
+        artist_id=artist_id,
+        source_url="https://example.com/bands/1/",
+        releases=[
+            ArtistReleaseEntry(
+                artist_id=artist_id,
+                release_id=1000,
+                title="New Release",
+                release_type="LP",
+                release_year=2024,
+                art_url="https://example.com/1000.jpg",
+                avg_rating=4.2,
+                ratings_count=50,
+                source_url="https://example.com/bands/1/",
+            )
+        ],
+        genres=["Techno", "House"],
+    )
 
 
 def _fetch_tracklist(album_id: int, client: StubClient) -> List[TrackEntry]:
@@ -111,6 +117,18 @@ def test_expand_discographies_inserts_releases_and_interactions(
             (1000,),
         ).fetchone()
         assert release_row == ("New Release", 2024, 4.2, 50)
+
+        genre_rows = connection.execute(
+            """
+            SELECT g.name
+            FROM artist_genres ag
+            JOIN genres g ON g.id_genre = ag.id_genre
+            WHERE ag.id_artist = ?
+            ORDER BY g.name
+            """,
+            (1,),
+        ).fetchall()
+        assert [row[0] for row in genre_rows] == ["House", "Techno"]
 
         track_rows = connection.execute(
             "SELECT track_title, duration_seconds FROM release_tracks WHERE id_release = ? ORDER BY track_position",
@@ -174,21 +192,26 @@ def test_expand_discographies_normalizes_duplicate_track_positions(
         *,
         artist_slug: str | None = None,
         client: StubClient | None = None,
-    ) -> List[ArtistReleaseEntry]:
+    ) -> ArtistDiscographyPage:
         assert artist_id == 1
-        return [
-            ArtistReleaseEntry(
-                artist_id=artist_id,
-                release_id=2000,
-                title="Multi Disc",
-                release_type="LP",
-                release_year=2020,
-                art_url=None,
-                avg_rating=None,
-                ratings_count=None,
-                source_url="https://example.com/bands/1/",
-            )
-        ]
+        return ArtistDiscographyPage(
+            artist_id=artist_id,
+            source_url="https://example.com/bands/1/",
+            releases=[
+                ArtistReleaseEntry(
+                    artist_id=artist_id,
+                    release_id=2000,
+                    title="Multi Disc",
+                    release_type="LP",
+                    release_year=2020,
+                    art_url=None,
+                    avg_rating=None,
+                    ratings_count=None,
+                    source_url="https://example.com/bands/1/",
+                )
+            ],
+            genres=[],
+        )
 
     def _tracklist_stub(album_id: int, client: StubClient) -> List[TrackEntry]:
         assert album_id == 2000
@@ -281,21 +304,26 @@ def test_expand_discographies_clamps_out_of_range_ratings(
         *,
         artist_slug: str | None = None,
         client: StubClient | None = None,
-    ) -> List[ArtistReleaseEntry]:
+    ) -> ArtistDiscographyPage:
         assert artist_id == 1
-        return [
-            ArtistReleaseEntry(
-                artist_id=artist_id,
-                release_id=3000,
-                title="Rating Clamp",
-                release_type="LP",
-                release_year=2024,
-                art_url=None,
-                avg_rating=None,
-                ratings_count=None,
-                source_url="https://example.com",
-            )
-        ]
+        return ArtistDiscographyPage(
+            artist_id=artist_id,
+            source_url="https://example.com",
+            releases=[
+                ArtistReleaseEntry(
+                    artist_id=artist_id,
+                    release_id=3000,
+                    title="Rating Clamp",
+                    release_type="LP",
+                    release_year=2024,
+                    art_url=None,
+                    avg_rating=None,
+                    ratings_count=None,
+                    source_url="https://example.com",
+                )
+            ],
+            genres=[],
+        )
 
     def _soundoffs_stub(
         album_id: int,
@@ -349,3 +377,77 @@ def test_expand_discographies_clamps_out_of_range_ratings(
             (3000,),
         ).fetchall()
         assert rows == [("high", 5.0), ("low", 0.0)]
+
+
+def test_expand_discographies_handles_existing_genre_conflict(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "INSERT INTO artists (id_artist, name) VALUES (?, ?)",
+            (2, "Artist Two"),
+        )
+        connection.execute(
+            "UPDATE crawl_artists SET status='pending', attempts=0, updated_at=datetime('now') WHERE id_artist IN (?, ?)",
+            (1, 2),
+        )
+        connection.commit()
+
+    def _discography_stub(
+        artist_id: int,
+        *,
+        artist_slug: str | None = None,
+        client: StubClient | None = None,
+    ) -> ArtistDiscographyPage:
+        release_id = 9000 + artist_id
+        return ArtistDiscographyPage(
+            artist_id=artist_id,
+            source_url=f"https://example.com/bands/{artist_id}/",
+            releases=[
+                ArtistReleaseEntry(
+                    artist_id=artist_id,
+                    release_id=release_id,
+                    title=f"Release {artist_id}",
+                    release_type="LP",
+                    release_year=2024,
+                    art_url=None,
+                    avg_rating=None,
+                    ratings_count=None,
+                    source_url=f"https://example.com/albums/{release_id}/",
+                )
+            ],
+            genres=["Shared Genre"],
+        )
+
+    monkeypatch.setattr("crawler.discography.fetch_artist_discography", _discography_stub)
+    monkeypatch.setattr("crawler.discography.fetch_tracklist", lambda *args, **kwargs: [])
+    monkeypatch.setattr("crawler.discography.fetch_soundoffs", lambda *args, **kwargs: [])
+
+    expand_discographies(
+        DiscographyConfig(
+            database_path=db_path,
+            schema_path=SCHEMA_PATH,
+            batch_size=2,
+            fetch_tracklists=False,
+            fetch_soundoffs=False,
+        ),
+        client=StubClient(),  # type: ignore[arg-type]
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        genre_rows = connection.execute(
+            """
+            SELECT ag.id_artist, g.name
+            FROM artist_genres ag
+            JOIN genres g ON g.id_genre = ag.id_genre
+            WHERE ag.id_artist IN (1, 2)
+            ORDER BY ag.id_artist
+            """,
+        ).fetchall()
+        assert genre_rows == [(1, "Shared Genre"), (2, "Shared Genre")]
+
+        genre_count = connection.execute(
+            "SELECT COUNT(*) FROM genres WHERE name = ?",
+            ("Shared Genre",),
+        ).fetchone()[0]
+        assert genre_count == 1
