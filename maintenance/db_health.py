@@ -67,6 +67,7 @@ class DBHealthChecker:
         issues.extend(self._check_release_queue_errors(sample_limit))
         issues.extend(self._check_release_metadata_gaps(sample_limit))
         issues.extend(self._check_release_rating_mismatches(sample_limit))
+        issues.extend(self._check_artist_genre_gaps(sample_limit))
         return issues
 
     def _check_user_queue_errors(self, sample_limit: int) -> List[HealthIssue]:
@@ -355,6 +356,45 @@ class DBHealthChecker:
             )
         ]
 
+    def _check_artist_genre_gaps(self, sample_limit: int) -> List[HealthIssue]:
+        cursor = self.connection.execute(
+            """
+            SELECT a.id_artist,
+                   a.name,
+                   COALESCE(ca.status, 'unknown') AS crawl_status,
+                   ca.updated_at,
+                   COUNT(ag.id_genre) AS genre_count
+            FROM artists AS a
+            LEFT JOIN crawl_artists AS ca ON ca.id_artist = a.id_artist
+            LEFT JOIN artist_genres AS ag ON ag.id_artist = a.id_artist
+            WHERE COALESCE(ca.status, 'pending') = 'done'
+            GROUP BY a.id_artist, a.name, ca.status, ca.updated_at
+            HAVING genre_count = 0
+            ORDER BY COALESCE(ca.updated_at, '1970-01-01') DESC
+            """
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        ids = [row["id_artist"] for row in rows]
+        sample = self._build_sample(
+            rows[:sample_limit],
+            ("id_artist", "name", "crawl_status", "updated_at"),
+        )
+        return [
+            HealthIssue(
+                category="artists.missing.genres",
+                entity="artist",
+                severity="medium",
+                description=f"{len(rows)} artistas sin generos asignados tras finalizar el crawl",
+                count=len(rows),
+                sample=sample,
+                suggested_fix="Reencolar artistas para completar generos",
+                fix=(lambda dry_run, ids=ids: self._enqueue_artists(ids, dry_run)) if ids else None,
+            )
+        ]
+
     @staticmethod
     def _classify_error(error_message: Any) -> str:
         if not error_message:
@@ -508,6 +548,29 @@ class DBHealthChecker:
                         "updated_at = excluded.updated_at"
                     ),
                     (release_id, now),
+                )
+        return len(ids)
+
+    def _enqueue_artists(self, ids: Sequence[int], dry_run: bool) -> int:
+        if not ids:
+            return 0
+        if dry_run:
+            return len(ids)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self.connection:
+            for artist_id in ids:
+                self.connection.execute(
+                    (
+                        "INSERT INTO crawl_artists "
+                        "(id_artist, status, attempts, last_error, last_crawled, updated_at) "
+                        "VALUES (?, 'pending', 0, NULL, NULL, ?) "
+                        "ON CONFLICT(id_artist) DO UPDATE SET "
+                        "status = 'pending', "
+                        "attempts = 0, "
+                        "last_error = NULL, "
+                        "updated_at = excluded.updated_at"
+                    ),
+                    (artist_id, now),
                 )
         return len(ids)
 

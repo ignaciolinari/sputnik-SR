@@ -57,11 +57,11 @@ show_menu() {
 
   echo "Selecciona qué información quieres ver:"
   echo "1) Ver log del crawler"
-  echo "2) Ver progreso de carga de datos"
+  echo "2) Ver progreso de fase 1 (seed most popular charts)"
   echo "3) Ver estadísticas de la base de datos"
   echo "4) Ver estado de colas de expansión"
   echo "5) Ver resumen del pipeline"
-  echo "6) Ver todo (modo automático)"
+  echo "6) Ver todo (actualización automática)"
   echo "7) Ver errores recientes"
   echo "8) Salir"
   echo
@@ -218,6 +218,8 @@ SELECT '  Users (usuarios): ' || COUNT(*) FROM users;
 SELECT '  Interactions (ratings): ' || COUNT(*) FROM interactions;
 SELECT '  Release tracks (canciones): ' || COUNT(*) FROM release_tracks;
 SELECT '  Artists (artistas): ' || COUNT(*) FROM artists;
+SELECT '  Géneros: ' || COUNT(*) FROM genres;
+SELECT '  Artist-Géneros (asignaciones): ' || COUNT(*) FROM artist_genres;
 SQL
 
     echo
@@ -240,6 +242,21 @@ SELECT '  ' || COALESCE(role, 'Sin rol') || ': ' || COUNT(*)
 FROM users
 GROUP BY role
 ORDER BY COUNT(*) DESC;
+SQL
+
+    echo
+    echo "Estadísticas de géneros:"
+    sqlite3 "${DB_PATH}" <<'SQL'
+.headers off
+.mode list
+SELECT '  Géneros únicos: ' || COUNT(*) FROM genres;
+SELECT '  Artistas con géneros: ' || COUNT(DISTINCT id_artist) FROM artist_genres;
+SELECT '  Artistas SIN géneros (terminados): ' || COUNT(DISTINCT a.id_artist)
+  FROM artists a
+  LEFT JOIN artist_genres ag ON ag.id_artist = a.id_artist
+  WHERE ag.id_genre IS NULL;
+SELECT '  Géneros por artista (promedio): ' || printf('%.2f', CAST(COUNT(*) AS FLOAT) / COUNT(DISTINCT id_artist))
+  FROM artist_genres;
 SQL
 
     echo
@@ -429,6 +446,13 @@ SQL
 SELECT '  Artistas pendientes: ' || COUNT(*) FROM crawl_artists WHERE status = 'pending';
 SELECT '  Artistas en proceso: ' || COUNT(*) FROM crawl_artists WHERE status = 'processing';
 SELECT '  Artistas con error: ' || COUNT(*) FROM crawl_artists WHERE status = 'error';
+SELECT '  Artistas completados: ' || COUNT(*) FROM crawl_artists WHERE status = 'done';
+SELECT '  Artistas con géneros: ' || COUNT(DISTINCT id_artist) FROM artist_genres;
+SELECT '  Artistas sin géneros (done): ' || COUNT(DISTINCT a.id_artist)
+  FROM artists a
+  LEFT JOIN crawl_artists ca ON ca.id_artist = a.id_artist
+  LEFT JOIN artist_genres ag ON ag.id_artist = a.id_artist
+  WHERE COALESCE(ca.status, 'pending') = 'done' AND ag.id_genre IS NULL;
 SELECT '  Releases pendientes: ' || COUNT(*) FROM crawl_releases WHERE status IN ('pending','seeded');
 SELECT '  Releases en proceso: ' || COUNT(*) FROM crawl_releases WHERE status = 'processing';
 SELECT '  Releases con error: ' || COUNT(*) FROM crawl_releases WHERE status = 'error';
@@ -480,6 +504,9 @@ SELECT '  releases=' || COUNT(*) FROM releases;
 SELECT '  users=' || COUNT(*) FROM users;
 SELECT '  interactions=' || COUNT(*) FROM interactions;
 SELECT '  release_tracks=' || COUNT(*) FROM release_tracks;
+SELECT '  artists=' || COUNT(*) FROM artists;
+SELECT '  genres=' || COUNT(*) FROM genres;
+SELECT '  artist_genres=' || COUNT(*) FROM artist_genres;
 SELECT '  crawl_users=' || COUNT(*) FROM crawl_users;
 SELECT '  crawl_artists=' || COUNT(*) FROM crawl_artists;
 SELECT '  crawl_releases=' || COUNT(*) FROM crawl_releases;
