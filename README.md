@@ -17,8 +17,8 @@ Proyecto para construir un sistema de recomendación de discos a partir de datos
 - [Base de datos](#base-de-datos)
 - [Scraper CLI](#scraper-cli)
 - [Crawler masivo](#crawler-masivo)
-- [Aplicación web de recomendaciones](#aplicación-web-de-recomendaciones)
 - [Monitoreo y seguimiento](#monitoreo-y-seguimiento)
+- [Aplicación web de recomendaciones](#aplicación-web-de-recomendaciones)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Pruebas](#pruebas)
 - [Pre-commits](#pre-commits)
@@ -155,6 +155,50 @@ Recomendaciones:
 - Monitorear `crawl_users` / `crawl_artists` / `crawl_releases` y `crawl_state`.
 - Relanzar los comandos sin miedo a duplicados (las tablas usan `ON CONFLICT`).
 
+## Monitoreo y seguimiento
+
+Hay un script interactivo que muestra el estado del crawler, colas e indicadores rápidos desde SQLite (requiere `sqlite3` en PATH):
+
+```bash
+scripts/monitor_crawler.sh data/sputnik.db logs/crawler-full.log
+```
+
+Funciones principales:
+- Tail del log y procesos activos del crawler.
+- Estado por año (`crawl_state`) y resumen por estado.
+- Estadísticas de la base (releases, users, interactions, distribución de ratings, top releases por cantidad de votos).
+- Estado de colas (`crawl_users`, `crawl_artists`, `crawl_releases`) y últimos errores.
+
+## Chequeo de salud de la base de datos
+
+Hay un chequeador automático para detectar y reparar problemas comunes en la base de datos (usuarios/releases con errores, metadata incompleta, ratings inconsistentes, etc).
+
+**Diagnóstico:**
+
+```bash
+./scripts/db_health.sh
+```
+
+**Opciones útiles:**
+
+- `--fix <categoria> --apply` repara automáticamente una categoría (ver sugerencias en la salida)
+- `--fix-all --apply` intenta reparar todo lo posible
+- `--format json` salida en JSON
+
+Ejemplo para reparar usuarios con error de conexión:
+
+```bash
+./scripts/db_health.sh --fix users.error.connection --apply
+```
+
+El script muestra progreso, sugerencias y reporta el tiempo total. No borra datos válidos, solo reencola, resetea o elimina del queue según el caso.
+
+Se recomienda hacer VACUUM para desfragmentar la base de datos después de reparaciones o ingestas grandes, lo que ayuda a optimizar el espacio y el rendimiento.
+
+```bash
+sqlite3 data/sputnik.db "VACUUM;"
+```
+
 ## Aplicación web de recomendaciones
 
 Interfaz simple en Flask para probar recomendaciones con la base local.
@@ -175,20 +219,6 @@ Luego abrí http://localhost:5050, ingresá un usuario (id público de Sputnik) 
 - Ofrece recomendaciones contextuales en `/recomendaciones/<id_release>` usando la tabla `release_recommendations` cuando exista; si no, cae en populares no vistos.
 
 Para limpiar el historial del usuario activo: GET a `/reset`.
-
-## Monitoreo y seguimiento
-
-Hay un script interactivo que muestra el estado del crawler, colas e indicadores rápidos desde SQLite (requiere `sqlite3` en PATH):
-
-```bash
-scripts/monitor_crawler.sh data/sputnik.db logs/crawler-full.log
-```
-
-Funciones principales:
-- Tail del log y procesos activos del crawler.
-- Estado por año (`crawl_state`) y resumen por estado.
-- Estadísticas de la base (releases, users, interactions, distribución de ratings, top releases por cantidad de votos).
-- Estado de colas (`crawl_users`, `crawl_artists`, `crawl_releases`) y últimos errores.
 
 ## Estructura del repositorio
 
