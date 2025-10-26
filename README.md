@@ -19,6 +19,8 @@ Proyecto para construir un sistema de recomendación de discos a partir de datos
 - [Crawler masivo](#crawler-masivo)
 - [Monitoreo y seguimiento](#monitoreo-y-seguimiento)
 - [Aplicación web de recomendaciones](#aplicación-web-de-recomendaciones)
+- [Sistema de recomendación híbrido](#sistema-de-recomendación-híbrido)
+- [Evaluación offline](#evaluación-offline)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Pruebas](#pruebas)
 - [Pre-commits](#pre-commits)
@@ -216,7 +218,7 @@ python -m app.app
 Luego abrí http://localhost:5050, ingresá un usuario (id público de Sputnik) y vas a ver una lista de recomendaciones. La app:
 - Marca como “visto” (rating = 0) cada candidato servido para evitar repeticiones.
 - Permite calificar [0–5] y guarda en `interactions` (con `rating_date = now()`).
-- Ofrece recomendaciones contextuales en `/recomendaciones/<id_release>` usando la tabla `release_recommendations` cuando exista; si no, cae en populares no vistos.
+- Ofrece recomendaciones contextuales en `/recomendaciones/<id_release>` usando la tabla `release_recommendations`; si no hay suficientes candidatos, suma vecinos por co-ocurrencia (`release_pairs`), lanzamientos del mismo artista y, como último recurso, populares no vistos.
 
 Para limpiar el historial del usuario activo: GET a `/reset`.
 
@@ -255,6 +257,73 @@ pre-commit run --all-files
 
 ## Notas sobre recomendaciones (heurística actual)
 
-- Página principal: selecciona lanzamientos populares no vistos por el usuario y, si faltan, completa con aleatorios no vistos.
-- Página de contexto: intenta usar `release_recommendations` para un `release_id` dado; si no hay suficientes, cae en populares no vistos.
+- Página principal: evalúa las señales del usuario y elige entre tres estrategias (
+  - **Co-ocurrencia** (`release_pairs`) para usuarios con pocas calificaciones positivas.
+  - **Perfiles de contenido** (géneros y artistas) para perfiles con mayor historial.
+  - **Popularidad** como fallback inicial.
+  - Si aún quedan slots vacíos, mezcla candidatos populares y aleatorios para diversificar.
+  )
+- Página de contexto: ensambla candidatos combinando `release_recommendations`, vecinos por `release_pairs`, otros lanzamientos del artista y populares no vistos.
 - Todas las interacciones se persisten en `interactions` con `rating` en [0, 5] y `rating_date = now()`.
+
+## Sistema de recomendación híbrido
+
+- Lógica central en `app/recommender.py` con configuración agrupada en la clase `Config`.
+- Estrategias implementadas:
+  - `recommend_from_pairs`: mezcla señales de co-ocurrencia ponderando rating y recencia.
+  - `recommend_content_based`: perfiles de usuario por géneros y artistas con prior de popularidad.
+  - `recommend_random`: muestreo uniforme de lanzamientos no vistos para exploración controlada.
+- Lógica híbrida en `recommend`:
+  - Usuarios sin ratings → populares + aleatorios.
+  - Hasta 5 ratings positivos → co-ocurrencia.
+  - Más de 5 → contenido.
+  - Diversificación por artista para evitar repeticiones.
+- `recommend_context` sigue la misma filosofía: recomendaciones directas, pares, artista y fallback popular.
+- La app muestra explicaciones en la UI y expone `last_strategy` / `last_context_strategy` para instrumentación.
+
+### Rebuilding de co-ocurrencias
+
+- Tabla `release_pairs` con métricas `pair_count`, `jaccard`, `lift` y `last_built_at`.
+- Script `scripts/build_release_pairs.py` recalcula las co-ocurrencias:
+
+    ```bash
+    python scripts/build_release_pairs.py --min-rating 3.0 --min-pair-count 3
+    ```
+
+- Ajusta el umbral de rating y el mínimo de pares según el tamaño de la base.
+
+### Configuración rápida de hiperparámetros
+
+- La clase `Config` permite modificar sin tocar la lógica:
+  - `positive_rating_threshold`: rating mínimo para considerar “señal positiva”.
+  - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares.
+  - `genre_weight` / `artist_weight` / `popularity_prior`: balance de cada componente en el score content-based.
+  - `recency_log_base`: logaritmo usado para atenuar la recencia.
+  - `candidate_pool_multiplier`: expande la búsqueda de candidatos en contenido.
+  - `pairs_limit_multiplier` / `pairs_table_sample`: controlan el tamaño del sample en co-ocurrencia.
+  - `popularity_recent_divisor`: suaviza el bonus por discos recientes.
+
+Modificá estos valores al inicio del módulo para experimentar sin reescribir funciones.
+
+## Evaluación offline
+
+- Script `scripts/evaluate_recommender.py` calcula NDCG@k por estrategia sobre usuarios con suficientes ratings.
+- Ejecutalo especificando la DB y la cantidad de usuarios a muestrear:
+
+    ```bash
+    python scripts/evaluate_recommender.py \
+        --database data/sputnik.db \
+        --min-ratings 50 \
+        --sample-size 100 \
+        --k 9 \
+        --output results.csv \
+        --verbose
+    ```
+
+- Reporta métricas promedio para:
+  - Híbrido (`recommend`)
+  - Co-ocurrencia (`recommend_from_pairs`)
+  - Contenido (`recommend_content_based`)
+  - Aleatorio (`recommend_random`)
+  - Popularidad (`_popular_unseen_releases`)
+- El CSV opcional permite seguir la evolución usuario por usuario.

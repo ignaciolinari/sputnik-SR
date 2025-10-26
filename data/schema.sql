@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS release_recommendations (
     CHECK (release_id <> recommended_release_id)
 );
 
+CREATE TABLE IF NOT EXISTS release_pairs (
+    id_release_1  INTEGER NOT NULL REFERENCES releases(id_release) ON DELETE CASCADE,
+    id_release_2  INTEGER NOT NULL REFERENCES releases(id_release) ON DELETE CASCADE,
+    pair_count    INTEGER NOT NULL CHECK (pair_count >= 0),
+    jaccard       REAL,
+    lift          REAL,
+    last_built_at TEXT NOT NULL,
+    PRIMARY KEY (id_release_1, id_release_2),
+    CHECK (id_release_1 <> id_release_2)
+);
+
 CREATE TABLE IF NOT EXISTS release_tracks (
     id_release       INTEGER NOT NULL REFERENCES releases(id_release) ON DELETE CASCADE,
     track_position   INTEGER NOT NULL CHECK (track_position > 0),
@@ -252,9 +263,11 @@ FROM releases r;
 ------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_interactions_user        ON interactions(id_user);
 CREATE INDEX IF NOT EXISTS idx_interactions_rating_date ON interactions(rating_date);
+CREATE INDEX IF NOT EXISTS idx_interactions_release     ON interactions(id_release);
 CREATE INDEX IF NOT EXISTS idx_release_genres_genre     ON release_genres(id_genre);
 CREATE INDEX IF NOT EXISTS idx_list_releases_release    ON list_releases(id_release);
 CREATE INDEX IF NOT EXISTS idx_staff_reviews_release    ON staff_reviews(id_release);
+CREATE INDEX IF NOT EXISTS idx_release_pairs_r1         ON release_pairs(id_release_1);
 
 -- Performance indexes for frequently queried columns
 CREATE INDEX IF NOT EXISTS idx_releases_artist_id ON releases(artist_id);

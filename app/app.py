@@ -45,6 +45,7 @@ def recommendations():
     releases = recommender.release_details(release_ids)
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
+    explanations = recommender.last_explanations(user_id)
 
     return render_template(
         "recommendations.html",
@@ -52,6 +53,7 @@ def recommendations():
         releases=releases,
         rated_count=rated_count,
         seen_count=seen_count,
+        explanations=explanations,
     )
 
 
@@ -71,6 +73,7 @@ def recommendations_for_release(release_id: int):
     releases = recommender.release_details(release_ids)
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
+    explanations = recommender.last_context_explanations(user_id, release_id)
 
     return render_template(
         "recommendations_release.html",
@@ -79,6 +82,7 @@ def recommendations_for_release(release_id: int):
         releases=releases,
         rated_count=rated_count,
         seen_count=seen_count,
+        explanations=explanations,
     )
 
 

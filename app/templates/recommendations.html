@@ -16,6 +16,16 @@
     </div>
 
     {% if releases %}
+    {% if explanations %}
+    <div class="mb-4 p-4 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-900">
+        <ul class="list-disc list-inside space-y-1">
+            {% for explanation in explanations %}
+            <li>{{ explanation }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
     <form method="post" action="/recomendaciones" class="space-y-6">
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
             {% for release in releases %}
