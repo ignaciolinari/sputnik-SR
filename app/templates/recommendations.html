@@ -15,6 +15,82 @@
         </div>
     </div>
 
+    <section class="mb-8 bg-white border rounded-lg shadow-sm">
+        <form method="get" class="p-4 flex flex-col gap-4">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <label class="text-sm text-slate-700 flex flex-col gap-1">
+                    Buscar
+                    <input type="text" name="q" value="{{ filter_values.q }}" placeholder="Disco, artista..." class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </label>
+                <label class="text-sm text-slate-700 flex flex-col gap-1">
+                    Artista
+                    <input type="text" name="artist" value="{{ filter_values.artist }}" placeholder="Nombre parcial o completo" class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500" />
+                </label>
+                <label class="text-sm text-slate-700 flex flex-col gap-1">
+                    Tipo de lanzamiento
+                    <select name="type" class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                        <option value="">Todos</option>
+                        {% for option in type_options %}
+                        <option value="{{ option }}" {% if filter_values.type == option %}selected{% endif %}>{{ option }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label class="text-sm text-slate-700 flex flex-col gap-1">
+                    Género
+                    <select name="genre_id" class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                        <option value="">Todos</option>
+                        {% for genre in genre_options %}
+                        <option value="{{ genre.id_genre }}" {% if filter_values.genre_id == genre.id_genre|string %}selected{% endif %}>{{ genre.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="text-sm text-slate-700 flex flex-col gap-1">
+                    Año de lanzamiento
+                    <select name="year" class="px-3 py-2 border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                        <option value="">Todos</option>
+                        {% for year in year_options %}
+                        <option value="{{ year }}" {% if filter_values.year == year|string %}selected{% endif %}>{{ year }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+                <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Buscar</button>
+                {% if has_filters %}
+                <a href="/recomendaciones" class="text-sm text-teal-600 hover:text-teal-700">Limpiar filtros</a>
+                {% endif %}
+            </div>
+        </form>
+    </section>
+
+    {% if has_filters %}
+    <section class="mb-10">
+        <h2 class="text-lg font-semibold text-slate-800 mb-3">Resultados del catálogo</h2>
+        {% if search_results %}
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {% for release in search_results %}
+            <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
+                <img src="{{ release.art_url or 'https://via.placeholder.com/200x200?text=Album' }}" alt="Arte de tapa" class="w-36 h-36 object-cover flex-none" />
+                <div class="p-4 flex flex-col gap-2 flex-1">
+                    <h2 class="text-lg font-semibold text-slate-800">
+                        <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
+                    </h2>
+                    <p class="text-sm text-slate-600">{{ release.artist_name }}{% if release.release_year %} &middot; {{ release.release_year }}{% endif %}</p>
+                    {% if release.avg_rating %}
+                    <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="p-6 bg-white border rounded text-slate-600">No encontramos resultados con estos filtros.</div>
+        {% endif %}
+    </section>
+    {% endif %}
+
     {% if releases %}
     {% if explanations %}
     <div class="mb-4 p-4 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-900">

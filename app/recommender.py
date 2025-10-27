@@ -712,3 +712,116 @@ def release_detail(release_id: int) -> dict | None:
 def release_details_map(release_ids: Sequence[int]) -> Dict[int, dict]:
     details_list = release_details(release_ids)
     return {item["id_release"]: item for item in details_list}
+
+
+def list_genres(limit: int = 200) -> List[dict]:
+    """Devolver una lista ordenada de géneros disponibles."""
+    rows = _select(
+        """
+        SELECT id_genre, name
+        FROM genres
+        ORDER BY name ASC
+        LIMIT ?;
+        """,
+        [limit],
+    )
+    return [
+        {
+            "id_genre": int(row["id_genre"]),
+            "name": row["name"],
+        }
+        for row in rows
+    ]
+
+
+def list_release_years(limit: int = 120) -> List[int]:
+    """Listar años de lanzamiento disponibles ordenados de forma descendente."""
+    rows = _select(
+        """
+        SELECT DISTINCT release_year
+        FROM releases
+        WHERE release_year IS NOT NULL
+        ORDER BY release_year DESC
+        LIMIT ?;
+        """,
+        [limit],
+    )
+    return [int(row["release_year"]) for row in rows]
+
+
+def list_release_types() -> List[str]:
+    """Listar los tipos de lanzamiento disponibles (LP, EP, etc)."""
+    rows = _select(
+        """
+        SELECT DISTINCT release_type
+        FROM releases
+        WHERE release_type IS NOT NULL
+        ORDER BY release_type ASC;
+        """
+    )
+    return [str(row["release_type"]) for row in rows]
+
+
+def search_catalog(
+    query: str | None = None,
+    *,
+    artist: str | None = None,
+    genre_id: int | None = None,
+    release_year: int | None = None,
+    release_type: str | None = None,
+    limit: int = 50,
+) -> List[dict]:
+    """Buscar lanzamientos del catálogo aplicando filtros opcionales."""
+
+    conditions: List[str] = []
+    parameters: List[object] = []
+
+    if query:
+        pattern = f"%{query.lower()}%"
+        conditions.append("(LOWER(r.title) LIKE ? OR LOWER(a.name) LIKE ?)")
+        parameters.extend([pattern, pattern])
+
+    if artist:
+        conditions.append("LOWER(a.name) LIKE ?")
+        parameters.append(f"%{artist.lower()}%")
+
+    if genre_id is not None:
+        conditions.append("rg.id_genre = ?")
+        parameters.append(int(genre_id))
+    if release_year is not None:
+        conditions.append("r.release_year = ?")
+        parameters.append(int(release_year))
+
+    if release_type:
+        conditions.append("LOWER(r.release_type) = ?")
+        parameters.append(release_type.lower())
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    sql = """
+        SELECT DISTINCT r.id_release
+        FROM releases AS r
+        JOIN artists AS a ON a.id_artist = r.artist_id
+        LEFT JOIN release_genres AS rg ON rg.id_release = r.id_release
+        LEFT JOIN genres AS g ON g.id_genre = rg.id_genre
+    """
+
+    if where_clause:
+        sql += f" {where_clause}"
+
+    sql += """
+        ORDER BY
+            (r.ratings_count IS NULL),
+            r.ratings_count DESC,
+            (r.avg_rating IS NULL),
+            r.avg_rating DESC,
+            r.title ASC
+        LIMIT ?;
+    """
+
+    rows = _select(sql, parameters + [limit])
+
+    release_ids = [int(row["id_release"]) for row in rows]
+    return release_details(release_ids)

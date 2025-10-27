@@ -37,23 +37,85 @@ def recommendations():
     user_id = request.cookies.get("id_usuario")
     if not user_id:
         return redirect("/")
+    search_query = (request.args.get("q") or "").strip()
+    artist_filter = (request.args.get("artist") or "").strip()
+    genre_id_raw = (request.args.get("genre_id") or "").strip()
+    year_raw = (request.args.get("year") or "").strip()
+    release_type = (request.args.get("type") or "").strip()
+
+    genre_id = None
+    if genre_id_raw:
+        try:
+            genre_id = int(genre_id_raw)
+        except ValueError:
+            genre_id = None
+
+    release_year = None
+    if year_raw:
+        try:
+            release_year = int(year_raw)
+        except ValueError:
+            release_year = None
+
+    has_filters = any(
+        [
+            search_query,
+            artist_filter,
+            genre_id is not None,
+            release_year is not None,
+            release_type,
+        ]
+    )
+
+    search_results = []
+    if has_filters:
+        search_results = recommender.search_catalog(
+            query=search_query or None,
+            artist=artist_filter or None,
+            genre_id=genre_id,
+            release_year=release_year,
+            release_type=release_type or None,
+            limit=36,
+        )
+
     release_ids = recommender.recommend(user_id)
 
     for release_id in release_ids:
         recommender.store_interaction(release_id, user_id, 0)
 
     releases = recommender.release_details(release_ids)
+    recommendation_ids = {item["id_release"] for item in releases}
+    if search_results:
+        search_results = [
+            item for item in search_results if item["id_release"] not in recommendation_ids
+        ]
+
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
     explanations = recommender.last_explanations(user_id)
+    genre_options = recommender.list_genres()
+    year_options = recommender.list_release_years()
+    type_options = recommender.list_release_types()
 
     return render_template(
         "recommendations.html",
         user_id=user_id,
         releases=releases,
+        search_results=search_results,
+        has_filters=has_filters,
         rated_count=rated_count,
         seen_count=seen_count,
         explanations=explanations,
+        filter_values={
+            "q": search_query,
+            "artist": artist_filter,
+            "genre_id": genre_id_raw,
+            "year": year_raw,
+            "type": release_type,
+        },
+        genre_options=genre_options,
+        year_options=year_options,
+        type_options=type_options,
     )
 
 

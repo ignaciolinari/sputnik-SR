@@ -158,6 +158,10 @@ def build_pairs(
             perf_counter() - snapshot_start,
         )
 
+    LOGGER.info(
+        "Calculating pair metrics (min_pair_count=%d)",
+        min_pair_count,
+    )
     metrics_start = perf_counter()
     connection.execute(
         """
@@ -190,9 +194,13 @@ def build_pairs(
         perf_counter() - metrics_start,
     )
 
+    LOGGER.info("Cleaning up temporary tables")
     connection.execute("DROP TABLE IF EXISTS temp_pair_counts;")
     connection.execute("DROP TABLE IF EXISTS temp_base_counts;")
     connection.execute("DROP TABLE IF EXISTS temp_positive;")
+
+    LOGGER.info("Running WAL checkpoint (TRUNCATE)")
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
 
     total_pairs = connection.execute("SELECT COUNT(*) FROM release_pairs;").fetchone()[0]
     LOGGER.info("Rebuilt release_pairs (%d rows)", total_pairs)
