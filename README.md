@@ -195,6 +195,12 @@ Ejemplo para reparar usuarios con error de conexión:
 
 El script muestra progreso, sugerencias y reporta el tiempo total. No borra datos válidos, solo reencola, resetea o elimina del queue según el caso.
 
+Si preferís ejecutarlo directamente desde Python (útil para integrar en notebooks o pipelines CI):
+
+```bash
+python maintenance/db_health.py --db data/sputnik.db --format json
+```
+
 Se recomienda hacer VACUUM para desfragmentar la base de datos después de reparaciones o ingestas grandes, lo que ayuda a optimizar el espacio y el rendimiento.
 
 ```bash
@@ -229,6 +235,8 @@ Para limpiar el historial del usuario activo: GET a `/reset`.
 - `app/`: app Flask y helpers de recomendaciones.
 - `data/`: esquema SQL (`schema.sql`) y backups.
 - `scripts/`: utilidades para sembrar, expandir y monitorear.
+- `maintenance/`: scripts de mantenimiento y chequeo de salud (`db_health.py`).
+- `offline_recommender/`: herramientas offline para recalcular co-ocurrencias, evaluar estrategias y almacenar resultados (`output/`).
 - `tests/`: suite de pruebas de parsing e integración.
 - `examples/`: uso del scraper desde scripts simples.
 - `notebooks/`: EDA y exploración.
@@ -284,10 +292,13 @@ pre-commit run --all-files
 ### Rebuilding de co-ocurrencias
 
 - Tabla `release_pairs` con métricas `pair_count`, `jaccard`, `lift` y `last_built_at`.
-- Script `scripts/build_release_pairs.py` recalcula las co-ocurrencias:
+- Script `offline_recommender/build_release_pairs.py` recalcula las co-ocurrencias:
 
     ```bash
-    python scripts/build_release_pairs.py --min-rating 3.0 --min-pair-count 3
+    python offline_recommender/build_release_pairs.py \
+        --database data/sputnik.db \
+        --min-rating 3.0 \
+        --min-pair-count 3
     ```
 
 - Ajusta el umbral de rating y el mínimo de pares según el tamaño de la base.
@@ -307,19 +318,23 @@ Modificá estos valores al inicio del módulo para experimentar sin reescribir f
 
 ## Evaluación offline
 
-- Script `scripts/evaluate_recommender.py` calcula NDCG@k por estrategia sobre usuarios con suficientes ratings.
+- Script `offline_recommender/evaluate_recommender.py` calcula NDCG@k por estrategia sobre usuarios con suficientes ratings.
 - Ejecutalo especificando la DB y la cantidad de usuarios a muestrear:
 
     ```bash
-    python scripts/evaluate_recommender.py \
+    python offline_recommender/evaluate_recommender.py \
         --database data/sputnik.db \
         --min-ratings 50 \
         --sample-size 100 \
         --k 9 \
-        --output results.csv \
+        --output offline_recommender/output/results.csv \
         --verbose
     ```
 
+- **Salida**
+  - Promedio de NDCG@k por estrategia (híbrido, pares, contenido, aleatorio, popularidad).
+  - Con `--verbose`, loggea por consola el NDCG de cada usuario evaluado.
+  - El CSV indicado en `--output` contiene una fila por usuario y puede analizarse luego en pandas o planillas; se recomienda guardarlo en `offline_recommender/output/`.
 - Reporta métricas promedio para:
   - Híbrido (`recommend`)
   - Co-ocurrencia (`recommend_from_pairs`)
