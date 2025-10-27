@@ -264,6 +264,7 @@ FROM releases r;
 CREATE INDEX IF NOT EXISTS idx_interactions_user        ON interactions(id_user);
 CREATE INDEX IF NOT EXISTS idx_interactions_rating_date ON interactions(rating_date);
 CREATE INDEX IF NOT EXISTS idx_interactions_release     ON interactions(id_release);
+CREATE INDEX IF NOT EXISTS idx_interactions_user_release ON interactions(id_user, id_release);
 CREATE INDEX IF NOT EXISTS idx_release_genres_genre     ON release_genres(id_genre);
 CREATE INDEX IF NOT EXISTS idx_list_releases_release    ON list_releases(id_release);
 CREATE INDEX IF NOT EXISTS idx_staff_reviews_release    ON staff_reviews(id_release);
