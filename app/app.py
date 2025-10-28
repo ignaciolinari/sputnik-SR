@@ -224,6 +224,47 @@ def reset_history():
     return redirect("/recomendaciones")
 
 
+@app.get("/usuarios/<user_id>")
+def user_collection_page(user_id: str):
+    current_user = request.cookies.get("id_usuario")
+    if not current_user:
+        return redirect("/")
+
+    target_user = (user_id or "").strip()
+    if not target_user:
+        abort(404)
+
+    recommender.ensure_user(target_user)
+    collection = recommender.user_collection(target_user)
+
+    rated_count = len(recommender.rated_release_ids(target_user))
+    seen_count = len(recommender.seen_release_ids(target_user))
+
+    next_url = request.path
+
+    collection_release_ids = [item["id_release"] for item in collection]
+    user_ratings = {}
+    if current_user == target_user:
+        user_ratings = recommender.user_ratings_map(target_user, collection_release_ids)
+
+    viewed_user = {
+        "id": target_user,
+        "is_self": current_user == target_user,
+    }
+
+    return render_template(
+        "user_collection.html",
+        user_id=current_user,
+        viewed_user=viewed_user,
+        collection=collection,
+        rated_count=rated_count,
+        seen_count=seen_count,
+        next_url=next_url,
+        rating_choices=RATING_CHOICES,
+        user_ratings=user_ratings,
+    )
+
+
 @app.get("/artistas/<int:artist_id>")
 def artist_page(artist_id: int):
     user_id = request.cookies.get("id_usuario")

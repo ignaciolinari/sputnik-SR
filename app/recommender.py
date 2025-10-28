@@ -150,6 +150,72 @@ def reset_user_history(user_id: str) -> None:
     _execute("DELETE FROM interactions WHERE id_user = ?;", [user_id])
 
 
+def user_collection(user_id: str) -> List[dict]:
+    """Devolver la coleccion puntuada de un usuario con metadata de cada disco."""
+
+    rows = _select(
+        """
+        SELECT
+            i.id_release,
+            i.rating,
+            i.rating_date,
+            r.title,
+            r.release_year,
+            r.release_type,
+            r.label,
+            r.avg_rating,
+            r.ratings_count,
+            r.art_url,
+            r.artist_id,
+            a.name AS artist_name
+        FROM interactions AS i
+        JOIN releases AS r ON r.id_release = i.id_release
+        JOIN artists AS a ON a.id_artist = r.artist_id
+        WHERE i.id_user = ? AND i.rating > 0
+        ORDER BY i.rating_date DESC
+        ;
+        """,
+        [user_id],
+    )
+
+    collection: List[dict] = []
+    for row in rows:
+        rating_value = float(row["rating"])
+        rating_date_raw = row["rating_date"]
+        rating_date_iso: str | None = None
+        rating_date_display: str | None = None
+        if rating_date_raw:
+            try:
+                rating_date_dt = datetime.datetime.fromisoformat(rating_date_raw)
+            except ValueError:
+                rating_date_dt = None
+            if rating_date_dt:
+                rating_date_iso = rating_date_dt.isoformat()
+                rating_date_display = rating_date_dt.strftime("%d/%m/%Y")
+            else:
+                rating_date_iso = str(rating_date_raw)
+
+        collection.append(
+            {
+                "id_release": int(row["id_release"]),
+                "title": row["title"],
+                "release_year": row["release_year"],
+                "release_type": row["release_type"],
+                "label": row["label"],
+                "avg_rating": row["avg_rating"],
+                "ratings_count": row["ratings_count"],
+                "art_url": row["art_url"],
+                "artist_id": int(row["artist_id"]),
+                "artist_name": row["artist_name"],
+                "rating": rating_value,
+                "rating_date": rating_date_iso,
+                "rating_date_display": rating_date_display,
+            }
+        )
+
+    return collection
+
+
 def rated_release_ids(user_id: str) -> List[int]:
     """Devolver los ids de lanzamientos con calificacion explicita (> 0)."""
     rows = _select(
