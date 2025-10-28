@@ -69,22 +69,43 @@
     <section class="mb-10">
         <h2 class="text-lg font-semibold text-slate-800 mb-3">Resultados del catálogo</h2>
         {% if search_results %}
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-            {% for release in search_results %}
-            <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
-                <img src="{{ release.art_url or 'https://via.placeholder.com/200x200?text=Album' }}" alt="Arte de tapa" class="w-36 h-36 object-cover flex-none" />
-                <div class="p-4 flex flex-col gap-2 flex-1">
-                    <h2 class="text-lg font-semibold text-slate-800">
-                        <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
-                    </h2>
-                    <p class="text-sm text-slate-600">{{ release.artist_name }}{% if release.release_year %} &middot; {{ release.release_year }}{% endif %}</p>
-                    {% if release.avg_rating %}
-                    <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
-                    {% endif %}
+        <form method="post" action="/recomendaciones" class="space-y-4">
+            <input type="hidden" name="next" value="{{ next_url }}" />
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {% for release in search_results %}
+                <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
+                    <img src="{{ release.art_url or 'https://via.placeholder.com/200x200?text=Album' }}" alt="Arte de tapa" class="w-36 h-36 object-cover flex-none" />
+                    <div class="p-4 flex flex-col gap-2 flex-1">
+                        <h2 class="text-lg font-semibold text-slate-800">
+                            <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
+                        </h2>
+                        <p class="text-sm text-slate-600">
+                            <a href="/artistas/{{ release.artist_id }}" class="hover:text-teal-600">{{ release.artist_name }}</a>
+                            {% if release.release_year %} &middot; {{ release.release_year }}{% endif %}
+                        </p>
+                        {% if release.avg_rating %}
+                        <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
+                        {% endif %}
+                        <div class="mt-auto flex items-center gap-2">
+                            <label for="search-release-{{ release.id_release }}" class="text-sm text-slate-700">Mi puntaje:</label>
+                            <select id="search-release-{{ release.id_release }}" name="{{ release.id_release }}" class="px-3 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                                <option value=""></option>
+                                {% for choice in rating_choices %}
+                                <option value="{{ choice.value }}" {% if user_ratings.get(release.id_release) == choice.value|float %}selected{% endif %}>{{ choice.label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        {% if user_ratings.get(release.id_release) %}
+                        <p class="text-xs text-slate-500">Tu &uacute;ltimo puntaje: {{ '%.1f'|format(user_ratings.get(release.id_release)) }}</p>
+                        {% endif %}
+                    </div>
                 </div>
+                {% endfor %}
             </div>
-            {% endfor %}
-        </div>
+            <div class="flex justify-end">
+                <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Guardar puntajes</button>
+            </div>
+        </form>
         {% else %}
         <div class="p-6 bg-white border rounded text-slate-600">No encontramos resultados con estos filtros.</div>
         {% endif %}
@@ -103,6 +124,7 @@
     {% endif %}
 
     <form method="post" action="/recomendaciones" class="space-y-6">
+        <input type="hidden" name="next" value="{{ next_url }}" />
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
             {% for release in releases %}
             <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
@@ -111,26 +133,25 @@
                     <h2 class="text-lg font-semibold text-slate-800">
                         <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
                     </h2>
-                    <p class="text-sm text-slate-600">{{ release.artist_name }}{% if release.release_year %} &middot; {{ release.release_year }}{% endif %}</p>
+                    <p class="text-sm text-slate-600">
+                        <a href="/artistas/{{ release.artist_id }}" class="hover:text-teal-600">{{ release.artist_name }}</a>
+                        {% if release.release_year %} &middot; {{ release.release_year }}{% endif %}
+                    </p>
                     {% if release.avg_rating %}
                     <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
                     {% endif %}
                     <div class="mt-auto flex items-center gap-2">
                         <label for="release-{{ release.id_release }}" class="text-sm text-slate-700">Mi puntaje:</label>
                         <select id="release-{{ release.id_release }}" name="{{ release.id_release }}" class="px-3 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
-                            <option value="" selected></option>
-                            <option value="0.5">Peor que ruido &ndash; 0.5</option>
-                            <option value="1.0">Horrible &ndash; 1.0</option>
-                            <option value="1.5">Muy pobre &ndash; 1.5</option>
-                            <option value="2.0">Pobre &ndash; 2.0</option>
-                            <option value="2.5">Promedio &ndash; 2.5</option>
-                            <option value="3.0">Bueno &ndash; 3.0</option>
-                            <option value="3.5">Muy bueno &ndash; 3.5</option>
-                            <option value="4.0">Excelente &ndash; 4.0</option>
-                            <option value="4.5">Magnífico &ndash; 4.5</option>
-                            <option value="5.0">Cl&aacute;sico &ndash; 5.0</option>
+                            <option value=""></option>
+                            {% for choice in rating_choices %}
+                            <option value="{{ choice.value }}" {% if user_ratings.get(release.id_release) == choice.value|float %}selected{% endif %}>{{ choice.label }}</option>
+                            {% endfor %}
                         </select>
                     </div>
+                    {% if user_ratings.get(release.id_release) %}
+                    <p class="text-xs text-slate-500">Tu &uacute;ltimo puntaje: {{ '%.1f'|format(user_ratings.get(release.id_release)) }}</p>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}

@@ -16,6 +16,20 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
+RATING_CHOICES = [
+    {"value": "0.5", "label": "Peor que ruido - 0.5"},
+    {"value": "1.0", "label": "Horrible - 1.0"},
+    {"value": "1.5", "label": "Muy pobre - 1.5"},
+    {"value": "2.0", "label": "Pobre - 2.0"},
+    {"value": "2.5", "label": "Promedio - 2.5"},
+    {"value": "3.0", "label": "Bueno - 3.0"},
+    {"value": "3.5", "label": "Muy bueno - 3.5"},
+    {"value": "4.0", "label": "Excelente - 4.0"},
+    {"value": "4.5", "label": "Magnifico - 4.5"},
+    {"value": "5.0", "label": "Clasico - 5.0"},
+]
+
+
 @app.get("/")
 def login_form() -> str:
     return render_template("login.html")
@@ -90,12 +104,22 @@ def recommendations():
             item for item in search_results if item["id_release"] not in recommendation_ids
         ]
 
+    all_release_ids = [item["id_release"] for item in releases] + [
+        item["id_release"] for item in search_results
+    ]
+    user_ratings = recommender.user_ratings_map(user_id, all_release_ids)
+
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
     explanations = recommender.last_explanations(user_id)
     genre_options = recommender.list_genres()
     year_options = recommender.list_release_years()
     type_options = recommender.list_release_types()
+
+    query_string = request.query_string.decode()
+    next_url = request.path
+    if query_string:
+        next_url = f"{request.path}?{query_string}"
 
     return render_template(
         "recommendations.html",
@@ -116,6 +140,9 @@ def recommendations():
         genre_options=genre_options,
         year_options=year_options,
         type_options=type_options,
+        user_ratings=user_ratings,
+        rating_choices=RATING_CHOICES,
+        next_url=next_url,
     )
 
 
@@ -137,6 +164,11 @@ def recommendations_for_release(release_id: int):
     seen_count = len(recommender.seen_release_ids(user_id))
     explanations = recommender.last_context_explanations(user_id, release_id)
 
+    all_release_ids = [release_id] + [item["id_release"] for item in releases]
+    user_ratings = recommender.user_ratings_map(user_id, all_release_ids)
+
+    next_url = request.path
+
     return render_template(
         "recommendations_release.html",
         user_id=user_id,
@@ -145,6 +177,9 @@ def recommendations_for_release(release_id: int):
         rated_count=rated_count,
         seen_count=seen_count,
         explanations=explanations,
+        user_ratings=user_ratings,
+        rating_choices=RATING_CHOICES,
+        next_url=next_url,
     )
 
 
@@ -155,6 +190,8 @@ def submit_ratings():
         return redirect("/")
 
     for release_id, value in request.form.items():
+        if release_id == "next":
+            continue
         value = (value or "").strip()
         if not value:
             continue
@@ -171,7 +208,11 @@ def submit_ratings():
             continue
         recommender.store_interaction(release_int, user_id, rating_value)
 
-    return redirect("/recomendaciones")
+    next_url = (request.form.get("next") or "").strip()
+    if not next_url or not next_url.startswith("/"):
+        next_url = "/recomendaciones"
+
+    return redirect(next_url)
 
 
 @app.get("/reset")
@@ -181,6 +222,38 @@ def reset_history():
         return redirect("/")
     recommender.reset_user_history(user_id)
     return redirect("/recomendaciones")
+
+
+@app.get("/artistas/<int:artist_id>")
+def artist_page(artist_id: int):
+    user_id = request.cookies.get("id_usuario")
+    if not user_id:
+        return redirect("/")
+
+    artist = recommender.artist_detail(artist_id)
+    if not artist:
+        abort(404)
+
+    releases = recommender.releases_by_artist(artist_id)
+    rated_count = len(recommender.rated_release_ids(user_id))
+    seen_count = len(recommender.seen_release_ids(user_id))
+
+    release_ids = [item["id_release"] for item in releases]
+    user_ratings = recommender.user_ratings_map(user_id, release_ids)
+
+    next_url = request.path
+
+    return render_template(
+        "artist.html",
+        user_id=user_id,
+        artist=artist,
+        releases=releases,
+        rated_count=rated_count,
+        seen_count=seen_count,
+        user_ratings=user_ratings,
+        next_url=next_url,
+        rating_choices=RATING_CHOICES,
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>{{ artist.name }} &mdash; Discografía</title>
+</head>
+<body class="px-6 py-4 bg-slate-50 min-h-screen">
+    <div class="flex flex-wrap items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl font-bold text-slate-800">{{ artist.name }}</h1>
+            <p class="text-sm text-slate-600">
+                {{ seen_count }} vistos &bull; {{ rated_count }} valorados
+            </p>
+        </div>
+        <div class="flex items-center gap-3 text-sm">
+            <a href="/recomendaciones" class="text-teal-600 hover:text-teal-700">Volver a recomendaciones</a>
+        </div>
+    </div>
+
+    <section class="mb-8 bg-white border rounded-lg shadow-sm p-4 space-y-3">
+        {% if artist.country %}
+        <p class="text-sm text-slate-600"><span class="font-semibold">País:</span> {{ artist.country }}</p>
+        {% endif %}
+        {% if artist.genre_tags %}
+        <p class="text-sm text-slate-600">
+            <span class="font-semibold">Géneros:</span>
+            {% for genre in artist.genre_tags %}
+            <span class="inline-block bg-teal-100 text-teal-700 px-2 py-0.5 rounded text-xs mr-2 mb-1">{{ genre }}</span>
+            {% endfor %}
+        </p>
+        {% endif %}
+        {% if artist.bio %}
+        <details class="text-sm text-slate-700">
+            <summary class="cursor-pointer text-teal-600">Leer bio</summary>
+            <p class="mt-2 whitespace-pre-line">{{ artist.bio }}</p>
+        </details>
+        {% endif %}
+    </section>
+
+    {% if releases %}
+    <form method="post" action="/recomendaciones" class="space-y-6">
+        <input type="hidden" name="next" value="{{ next_url }}" />
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            {% for release in releases %}
+            <div class="flex border bg-white rounded-lg shadow-sm overflow-hidden">
+                <img src="{{ release.art_url or 'https://via.placeholder.com/200x200?text=Album' }}" alt="Arte de tapa" class="w-36 h-36 object-cover flex-none" />
+                <div class="p-4 flex flex-col gap-2 flex-1">
+                    <h3 class="text-lg font-semibold text-slate-800">
+                        <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
+                    </h3>
+                    <p class="text-sm text-slate-600">
+                        {% if release.release_year %}{{ release.release_year }}{% else %}Sin año{% endif %}
+                        {% if release.release_type %} &middot; {{ release.release_type }}{% endif %}
+                    </p>
+                    {% if release.avg_rating %}
+                    <p class="text-xs text-slate-500">Promedio {{ '%.2f'|format(release.avg_rating) }} ({{ release.ratings_count or 0 }} votos)</p>
+                    {% endif %}
+                    {% if release.label %}
+                    <p class="text-xs text-slate-500">Editado por {{ release.label }}</p>
+                    {% endif %}
+                    <div class="mt-auto flex items-center gap-2">
+                        <label for="release-{{ release.id_release }}" class="text-sm text-slate-700">Mi puntaje:</label>
+                        <select id="release-{{ release.id_release }}" name="{{ release.id_release }}" class="px-3 py-1 text-sm border rounded focus:outline-none focus:ring-2 focus:ring-teal-500">
+                            <option value=""></option>
+                            {% for choice in rating_choices %}
+                            <option value="{{ choice.value }}" {% if user_ratings.get(release.id_release) == choice.value|float %}selected{% endif %}>{{ choice.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    {% if user_ratings.get(release.id_release) %}
+                    <p class="text-xs text-slate-500">Tu &uacute;ltimo puntaje: {{ '%.1f'|format(user_ratings.get(release.id_release)) }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="flex justify-end">
+            <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Guardar puntajes</button>
+        </div>
+    </form>
+    {% else %}
+    <div class="p-6 bg-white border rounded text-slate-600">Todavía no tenemos lanzamientos registrados para este artista.</div>
+    {% endif %}
+</body>
+</html>

@@ -164,6 +164,42 @@ def rated_release_ids(user_id: str) -> List[int]:
     return [int(row["id_release"]) for row in rows]
 
 
+def user_ratings_map(user_id: str, release_ids: Sequence[int] | None = None) -> Dict[int, float]:
+    """Devolver un diccionario de id_release -> rating para un usuario dado."""
+
+    if release_ids is not None:
+        normalized = [int(release_id) for release_id in release_ids if release_id is not None]
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        rows = _select(
+            f"""
+            SELECT id_release, rating
+            FROM interactions
+            WHERE id_user = ? AND id_release IN ({placeholders})
+            """,
+            [user_id] + normalized,
+        )
+    else:
+        rows = _select(
+            """
+            SELECT id_release, rating
+            FROM interactions
+            WHERE id_user = ?;
+            """,
+            [user_id],
+        )
+
+    ratings: Dict[int, float] = {}
+    for row in rows:
+        try:
+            release_id = int(row["id_release"])
+            ratings[release_id] = float(row["rating"])
+        except (TypeError, ValueError):
+            continue
+    return ratings
+
+
 def _user_interactions(user_id: str, min_rating: float | None = None) -> List[Interaction]:
     rows = _select(
         """
@@ -673,6 +709,8 @@ def release_details(release_ids: Sequence[int]) -> List[dict]:
         SELECT
             r.id_release,
             r.title,
+            r.artist_id,
+            r.release_type,
             r.release_year,
             r.label,
             r.avg_rating,
@@ -690,6 +728,8 @@ def release_details(release_ids: Sequence[int]) -> List[dict]:
         int(row["id_release"]): {
             "id_release": int(row["id_release"]),
             "title": row["title"],
+            "artist_id": int(row["artist_id"]),
+            "release_type": row["release_type"],
             "release_year": row["release_year"],
             "label": row["label"],
             "avg_rating": row["avg_rating"],
@@ -712,6 +752,72 @@ def release_detail(release_id: int) -> dict | None:
 def release_details_map(release_ids: Sequence[int]) -> Dict[int, dict]:
     details_list = release_details(release_ids)
     return {item["id_release"]: item for item in details_list}
+
+
+def artist_detail(artist_id: int) -> dict | None:
+    rows = _select(
+        """
+        SELECT id_artist, name, country, bio, genre_tags
+        FROM artists_enriched
+        WHERE id_artist = ?;
+        """,
+        [artist_id],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    genre_tags_raw = row["genre_tags"]
+    try:
+        genre_tags = json.loads(genre_tags_raw) if genre_tags_raw else []
+    except (TypeError, json.JSONDecodeError):
+        genre_tags = []
+    return {
+        "id_artist": int(row["id_artist"]),
+        "name": row["name"],
+        "country": row["country"],
+        "bio": row["bio"],
+        "genre_tags": genre_tags,
+    }
+
+
+def releases_by_artist(artist_id: int) -> List[dict]:
+    rows = _select(
+        """
+        SELECT
+            r.id_release,
+            r.title,
+            r.release_year,
+            r.release_type,
+            r.label,
+            r.avg_rating,
+            r.ratings_count,
+            r.art_url,
+            a.name AS artist_name
+        FROM releases AS r
+        JOIN artists AS a ON a.id_artist = r.artist_id
+        WHERE r.artist_id = ?
+        ORDER BY
+            r.release_year IS NULL,
+            r.release_year DESC,
+            r.title ASC;
+        """,
+        [artist_id],
+    )
+    return [
+        {
+            "id_release": int(row["id_release"]),
+            "title": row["title"],
+            "release_year": row["release_year"],
+            "release_type": row["release_type"],
+            "label": row["label"],
+            "avg_rating": row["avg_rating"],
+            "ratings_count": row["ratings_count"],
+            "art_url": row["art_url"],
+            "artist_id": int(artist_id),
+            "artist_name": row["artist_name"],
+        }
+        for row in rows
+    ]
 
 
 def list_genres(limit: int = 200) -> List[dict]:
