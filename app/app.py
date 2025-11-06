@@ -6,6 +6,7 @@ import os
 
 from flask import Flask
 from flask import abort
+from flask import g
 from flask import make_response
 from flask import redirect
 from flask import render_template
@@ -35,20 +36,79 @@ RATING_CHOICES = [
 ]
 
 
+def _database_variant_options(
+    preferred_variant: str | None = None,
+) -> tuple[list[dict], str | None]:
+    variants = recommender.available_database_variants()
+    available_ids = [item["id"] for item in variants if item["available"]]
+
+    selected = preferred_variant if preferred_variant in available_ids else None
+    if not selected:
+        if available_ids:
+            selected = available_ids[0]
+        elif variants:
+            selected = variants[0]["id"]
+    return variants, selected
+
+
+@app.before_request
+def _apply_request_database_variant() -> None:
+    preferred = request.cookies.get("db_variant")
+    token = recommender.set_request_database_variant(preferred)
+    g._db_variant_token = token
+
+
+@app.teardown_request
+def _reset_request_database_variant(_exc: Exception | None) -> None:
+    token = getattr(g, "_db_variant_token", None)
+    if token is not None:
+        recommender.reset_request_database_variant(token)
+        g._db_variant_token = None
+
+
 @app.get("/")
 def login_form() -> str:
-    return render_template("login.html")
+    preferred_variant = request.cookies.get("db_variant")
+    db_variants, selected_variant = _database_variant_options(preferred_variant)
+    return render_template(
+        "login.html",
+        db_variants=db_variants,
+        selected_db_variant=selected_variant,
+    )
 
 
 @app.post("/")
 def login_submit():
     user_id = (request.form.get("id_usuario") or "").strip()
-    if user_id:
-        recommender.ensure_user(user_id)
-        response = make_response(redirect("/recomendaciones"))
-        response.set_cookie("id_usuario", user_id, max_age=60 * 60 * 24 * 30)
-        return response
-    return render_template("login.html", error="Necesitamos un usuario valido.")
+    requested_variant = (request.form.get("db_variant") or "").strip()
+
+    db_variants, selected_variant = _database_variant_options(requested_variant)
+
+    if not user_id:
+        return render_template(
+            "login.html",
+            error="Necesitamos un usuario valido.",
+            db_variants=db_variants,
+            selected_db_variant=selected_variant,
+        )
+
+    previous_token = getattr(g, "_db_variant_token", None)
+    if previous_token is not None:
+        recommender.reset_request_database_variant(previous_token)
+    new_token = recommender.set_request_database_variant(selected_variant)
+    g._db_variant_token = new_token
+
+    recommender.ensure_user(user_id)
+
+    response = make_response(redirect("/recomendaciones"))
+    response.set_cookie("id_usuario", user_id, max_age=60 * 60 * 24 * 30, samesite="Lax")
+    if selected_variant:
+        response.set_cookie(
+            "db_variant", selected_variant, max_age=60 * 60 * 24 * 30, samesite="Lax"
+        )
+    else:
+        response.delete_cookie("db_variant")
+    return response
 
 
 @app.get("/recomendaciones")

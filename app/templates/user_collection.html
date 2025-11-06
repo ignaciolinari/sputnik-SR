@@ -32,7 +32,7 @@
                     <a href="/recomendaciones/{{ item.id_release }}" class="hover:text-teal-600">{{ item.title }}</a>
                 </h2>
                 <p class="text-sm text-slate-600">
-                    <a href="/artistas/{{ item.artist_id }}" class="hover:text-teal-600">{{ item.artist_name }}</a>
+                    <a href="/artistas/{{ item.artist_id }}" class="font-semibold hover:text-teal-600">{{ item.artist_name }}</a>
                     {% if item.release_year %} &middot; {{ item.release_year }}{% endif %}
                 </p>
                 {% if item.avg_rating %}

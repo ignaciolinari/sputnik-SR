@@ -93,7 +93,7 @@
                             <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
                         </h2>
                         <p class="text-sm text-slate-600">
-                            <a href="/artistas/{{ release.artist_id }}" class="hover:text-teal-600">{{ release.artist_name }}</a>
+                            <a href="/artistas/{{ release.artist_id }}" class="font-semibold hover:text-teal-600">{{ release.artist_name }}</a>
                             {% if release.release_year %} &middot; {{ release.release_year }}{% endif %}
                         </p>
                         {% if release.avg_rating %}
@@ -147,7 +147,7 @@
                         <a href="/recomendaciones/{{ release.id_release }}" class="hover:text-teal-600">{{ release.title }}</a>
                     </h2>
                     <p class="text-sm text-slate-600">
-                        <a href="/artistas/{{ release.artist_id }}" class="hover:text-teal-600">{{ release.artist_name }}</a>
+                        <a href="/artistas/{{ release.artist_id }}" class="font-semibold hover:text-teal-600">{{ release.artist_name }}</a>
                         {% if release.release_year %} &middot; {{ release.release_year }}{% endif %}
                     </p>
                     {% if release.avg_rating %}
@@ -189,19 +189,52 @@
             </div>
             <div class="space-y-6 text-sm text-slate-600">
                 <section>
-                    <h3 class="text-sm font-semibold text-slate-700 mb-1">Base de datos</h3>
+                    <h3 class="text-base font-semibold text-slate-700 mb-1">Base de datos</h3>
                     <p class="mb-1">
                         Actualmente se usa la base
                         <span class="font-semibold text-slate-800">{{ database_info.variant_label }}</span>
                         (<code class="font-mono text-xs">{{ database_info.filename }}</code>).
                     </p>
                     <p class="text-xs text-slate-500">{{ database_info.variant_description }}</p>
+                    {% if database_info.stats %}
+                    <p class="mt-3 text-xs text-slate-500">
+                        Peso actual:
+                        <span class="font-semibold text-slate-700">{{ database_info.stats.size_display }}</span>
+                    </p>
+                    <p class="text-xs text-slate-500">
+                        Registros aproximados:
+                        Usuarios {{ database_info.stats.counts_display.users }},
+                        Artistas {{ database_info.stats.counts_display.artists }},
+                        Discos {{ database_info.stats.counts_display.releases }},
+                        Puntuaciones {{ database_info.stats.counts_display.interactions }}.
+                    </p>
+                    {% endif %}
+                    {% if database_info.reference %}
+                    <p class="mt-3 text-xs text-slate-500">
+                        Referencia {{ database_info.reference.variant_label }}:
+                        <code class="font-mono text-xs">{{ database_info.reference.filename }}</code>
+                        ({{ database_info.reference.stats.size_display }})
+                    </p>
+                    {% endif %}
+                    {% if database_info.reduction %}
+                    <div class="mt-4 border border-amber-200 bg-amber-50 rounded-lg p-3 text-amber-900 text-xs space-y-2">
+                        <p class="font-semibold uppercase tracking-wide">
+                            Comparativa {{ database_info.variant_label }} vs {{ database_info.reference.variant_label if database_info.reference else 'Completa' }}
+                        </p>
+                        <p>{{ database_info.reduction.size.summary }}</p>
+                        <ul class="space-y-1">
+                            {% for item in database_info.reduction.counts %}
+                            <li>{{ item.label }}: {{ item.current }} vs {{ item.reference }} ({{ item.ratio_display }} del total)</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
                     <p class="mt-3 text-xs text-slate-500">
                         Ruta: <span class="font-mono break-all">{{ database_info.path }}</span>
                     </p>
                 </section>
                 <section>
-                    <h3 class="text-sm font-semibold text-slate-700 mb-2">Sistemas de recomendación activos</h3>
+                    <h3 class="text-base font-semibold text-slate-700 mb-2">Sistemas de recomendación activos</h3>
                     <ul class="space-y-2">
                         {% for system in active_recommenders %}
                         <li class="border border-slate-200 rounded-lg p-3">

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import collections
 import datetime
+import functools
 import json
 import math
 import os
 import random
 import sqlite3
+from contextvars import ContextVar
+from contextvars import Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
@@ -33,6 +36,127 @@ class Config:
 _DEFAULT_POSITIVE_RATING = Config.positive_rating_threshold
 
 
+_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+_VARIANT_DEFAULTS = {
+    "full": (_DATA_DIR / "sputnik.db").resolve(),
+    "lite": (_DATA_DIR / "sputnik_lite.db").resolve(),
+}
+
+_VARIANT_ALIASES = {
+    "lite": "lite",
+    "light": "lite",
+    "lite-lite": "lite",
+    "lite_db": "lite",
+    "lite-db": "lite",
+    "full": "full",
+    "completa": "full",
+    "completo": "full",
+    "complete": "full",
+    "default": "full",
+    "original": "full",
+    "override": "override",
+}
+
+_VARIANT_METADATA = {
+    "lite": {
+        "label": "Lite",
+        "description": "Base reducida para pruebas y despliegues livianos.",
+    },
+    "full": {
+        "label": "Completa",
+        "description": "Base completa con el catálogo y señales originales.",
+    },
+}
+
+_PYTHONANYWHERE_HINT_ENV_VARS = (
+    "PYTHONANYWHERE_DOMAIN",
+    "PYTHONANYWHERE_SITE",
+    "PYTHONANYWHERE_HOSTING_ACCOUNT",
+    "PYTHONANYWHERE_USER",
+)
+
+_COUNT_LABELS = [
+    ("users", "Usuarios"),
+    ("artists", "Artistas"),
+    ("releases", "Discos"),
+    ("interactions", "Puntuaciones"),
+]
+
+_REQUEST_VARIANT: ContextVar[str | None] = ContextVar("sputnik_request_db_variant", default=None)
+
+
+def set_request_database_variant(variant: str | None) -> Token:
+    normalized = _normalize_variant(variant)
+    if normalized == "override":
+        normalized = None
+    if normalized not in _VARIANT_DEFAULTS:
+        normalized = None
+    return _REQUEST_VARIANT.set(normalized)
+
+
+def reset_request_database_variant(token: Token | None) -> None:
+    if token is None:
+        return
+    try:
+        _REQUEST_VARIANT.reset(token)
+    except (LookupError, ValueError):
+        pass
+
+
+def current_request_database_variant() -> str | None:
+    return _REQUEST_VARIANT.get()
+
+
+def available_database_variants() -> List[dict]:
+    override = os.getenv("SPUTNIK_DB")
+    variants: List[dict] = []
+
+    if override:
+        override_path = Path(override).expanduser()
+        try:
+            resolved_path = override_path.resolve()
+        except OSError:
+            resolved_path = override_path
+        exists = resolved_path.exists()
+        variants.append(
+            {
+                "id": "override",
+                "label": "Configuración personalizada",
+                "description": "Ruta fija definida por la variable SPUTNIK_DB.",
+                "filename": resolved_path.name,
+                "path": str(resolved_path),
+                "available": exists,
+                "unavailable_reason": None if exists else "No se encontró el archivo configurado.",
+            }
+        )
+        return variants
+
+    python_anywhere = _running_on_pythonanywhere()
+    for key, default_path in _VARIANT_DEFAULTS.items():
+        meta = _VARIANT_METADATA.get(key, {"label": key.title(), "description": ""})
+        exists = default_path.exists()
+        available = exists and (not python_anywhere or key != "full")
+        reason = None
+        if not exists:
+            reason = "Archivo no disponible en este entorno."
+        elif python_anywhere and key == "full":
+            reason = "No disponible en este entorno; usá la versión Lite."
+        variants.append(
+            {
+                "id": key,
+                "label": meta["label"],
+                "description": meta["description"],
+                "filename": default_path.name,
+                "path": str(default_path),
+                "available": available,
+                "unavailable_reason": reason,
+            }
+        )
+
+    return variants
+
+
 _LAST_EXPLANATIONS: Dict[str, List[str]] = {}
 _LAST_CONTEXT_EXPLANATIONS: Dict[tuple[str, int], List[str]] = {}
 _LAST_STRATEGY: Dict[str, str] = {}
@@ -46,13 +170,178 @@ class Interaction:
     rating_date: datetime.datetime | None
 
 
+def _normalize_variant(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    return _VARIANT_ALIASES.get(normalized, normalized)
+
+
+def _running_on_pythonanywhere() -> bool:
+    return any(os.getenv(env_var) for env_var in _PYTHONANYWHERE_HINT_ENV_VARS)
+
+
+def _variant_path_from_hint(variant: str | None) -> Path | None:
+    if not variant:
+        return None
+    normalized = _normalize_variant(variant)
+    if normalized in _VARIANT_DEFAULTS:
+        return _VARIANT_DEFAULTS[normalized]
+    candidate = Path(variant).expanduser()
+    if not candidate.is_absolute():
+        candidate = (_DATA_DIR / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def _format_bytes(num_bytes: int | float | None) -> str:
+    if not num_bytes or num_bytes <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(num_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TB"
+
+
+def _format_int(value: int | None) -> str:
+    if value is None:
+        return "N/D"
+    return f"{value:,}".replace(",", ".")
+
+
+@functools.lru_cache(maxsize=8)
+def _collect_database_stats_cached(path_str: str, signature: float):
+    path = Path(path_str)
+    if not path.exists():
+        counts_data = tuple((key, None) for key, _ in _COUNT_LABELS)
+        counts_display = tuple((key, "N/D") for key, _ in _COUNT_LABELS)
+        return 0, "0 B", counts_data, counts_display
+
+    size_bytes = path.stat().st_size
+
+    counts: Dict[str, int | None] = {}
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+    except sqlite3.OperationalError:
+        counts_data = tuple((key, None) for key, _ in _COUNT_LABELS)
+        counts_display = tuple((key, "N/D") for key, _ in _COUNT_LABELS)
+        return size_bytes, _format_bytes(size_bytes), counts_data, counts_display
+
+    try:
+        for table_key, _ in _COUNT_LABELS:
+            try:
+                cursor = connection.execute(f"SELECT COUNT(*) AS total FROM {table_key};")
+                row = cursor.fetchone()
+                counts[table_key] = int(row["total"]) if row and row["total"] is not None else 0
+            except sqlite3.OperationalError:
+                counts[table_key] = None
+    finally:
+        connection.close()
+
+    counts_data = tuple((key, counts.get(key)) for key, _ in _COUNT_LABELS)
+    counts_display = tuple((key, _format_int(counts.get(key))) for key, _ in _COUNT_LABELS)
+
+    return size_bytes, _format_bytes(size_bytes), counts_data, counts_display
+
+
+def _collect_database_stats(path: Path) -> dict:
+    signature = path.stat().st_mtime if path.exists() else 0.0
+    size_bytes, size_display, counts_data, counts_display_data = _collect_database_stats_cached(
+        str(path), signature
+    )
+    counts = {key: value for key, value in counts_data}
+    counts_display = {key: value for key, value in counts_display_data}
+    return {
+        "size_bytes": size_bytes,
+        "size_display": size_display,
+        "counts": counts,
+        "counts_display": counts_display,
+    }
+
+
+def _build_reduction_summary(
+    current_stats: dict, reference_stats: dict, current_label: str, reference_label: str
+) -> dict | None:
+    if not current_stats or not reference_stats:
+        return None
+
+    size_current = current_stats.get("size_bytes") or 0
+    size_reference = reference_stats.get("size_bytes") or 0
+    ratio = None
+    if size_reference > 0 and size_current >= 0:
+        ratio = size_current / size_reference
+
+    size_ratio_display = f"{ratio * 100:.1f}%" if ratio is not None else "N/D"
+    reduction_percent = max(0.0, (1 - ratio) * 100) if ratio is not None else None
+    reduction_display = f"{reduction_percent:.1f}%" if reduction_percent is not None else "N/D"
+
+    size_summary = (
+        f"{current_label} pesa {current_stats['size_display']} vs {reference_stats['size_display']}"
+        f"({size_ratio_display} del tamaño de {reference_label}, reducción {reduction_display})."
+    )
+
+    counts_summary = []
+    for key, label in _COUNT_LABELS:
+        current_display = current_stats["counts_display"].get(key, "N/D")
+        reference_display = reference_stats["counts_display"].get(key, "N/D")
+        current_value = current_stats["counts"].get(key)
+        reference_value = reference_stats["counts"].get(key)
+        if (
+            isinstance(current_value, int)
+            and isinstance(reference_value, int)
+            and reference_value > 0
+        ):
+            counts_ratio = current_value / reference_value
+            counts_ratio_display = f"{counts_ratio * 100:.1f}%"
+        else:
+            counts_ratio_display = "N/D"
+        counts_summary.append(
+            {
+                "label": label,
+                "current": current_display,
+                "reference": reference_display,
+                "ratio_display": counts_ratio_display,
+            }
+        )
+
+    return {
+        "size": {
+            "current": current_stats["size_display"],
+            "reference": reference_stats["size_display"],
+            "ratio_display": size_ratio_display,
+            "reduction_display": reduction_display,
+            "summary": size_summary,
+        },
+        "counts": counts_summary,
+    }
+
+
 def _resolve_database_path() -> Path:
     """Resolver la ruta de la base SQLite de Sputnik respetando la variable SPUTNIK_DB."""
+    request_variant = _REQUEST_VARIANT.get()
+    if request_variant:
+        request_candidate = _variant_path_from_hint(request_variant)
+        if request_candidate and request_candidate.exists():
+            return request_candidate
+
     override = os.getenv("SPUTNIK_DB")
     if override:
         candidate = Path(override).expanduser().resolve()
     else:
-        candidate = Path(__file__).resolve().parents[1] / "data" / "sputnik.db"
+        variant_hint = _normalize_variant(os.getenv("SPUTNIK_DB_VARIANT"))
+        if not variant_hint and _running_on_pythonanywhere():
+            variant_hint = "lite"
+
+        candidate_path = _variant_path_from_hint(variant_hint) if variant_hint else None
+        if not candidate_path:
+            candidate_path = _VARIANT_DEFAULTS["full"]
+        candidate = candidate_path
+
     if not candidate.exists():
         raise FileNotFoundError(
             f"Sputnik database not found at {candidate}. Set SPUTNIK_DB to override the path."
@@ -1004,19 +1293,38 @@ def current_database_info() -> dict:
 
     path = _resolve_database_path()
     filename = path.name
-    variant_key = "lite" if "lite" in filename.lower() else "completa"
-    variant_label = "Lite" if variant_key == "lite" else "Completa"
-    variant_description = (
-        "Base reducida para pruebas y demos rápidas."
-        if variant_key == "lite"
-        else "Base completa con el catálogo y señales originales."
-    )
+    variant_key = "lite" if "lite" in filename.lower() else "full"
+    variant_meta = _VARIANT_METADATA.get(variant_key, _VARIANT_METADATA["full"])
+
+    stats = _collect_database_stats(path)
+
+    reference_info = None
+    reduction_info = None
+
+    if variant_key == "lite":
+        full_path = _VARIANT_DEFAULTS.get("full")
+        if full_path and full_path.exists() and full_path != path:
+            full_stats = _collect_database_stats(full_path)
+            reference_info = {
+                "path": str(full_path),
+                "filename": full_path.name,
+                "variant": "full",
+                "variant_label": _VARIANT_METADATA["full"]["label"],
+                "stats": full_stats,
+            }
+            reduction_info = _build_reduction_summary(
+                stats, full_stats, variant_meta["label"], _VARIANT_METADATA["full"]["label"]
+            )
+
     return {
         "path": str(path),
         "filename": filename,
         "variant": variant_key,
-        "variant_label": variant_label,
-        "variant_description": variant_description,
+        "variant_label": variant_meta["label"],
+        "variant_description": variant_meta["description"],
+        "stats": stats,
+        "reference": reference_info,
+        "reduction": reduction_info,
     }
 
 
@@ -1030,7 +1338,7 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "id": "pairs",
         "name": "Co-ocurrencia (release_pairs)",
         "description": (
-            "Aprovecha discos que suelen aparecer juntos cuando tenés pocas "
+            "Aprovecha discos que suelen aparecer juntos cuando tenés algunas "
             "calificaciones positivas."
         ),
     },
