@@ -997,3 +997,68 @@ def search_catalog(
 
     release_ids = [int(row["id_release"]) for row in rows]
     return release_details(release_ids)
+
+
+def current_database_info() -> dict:
+    """Informar la base de datos actual y su variante (lite o completa)."""
+
+    path = _resolve_database_path()
+    filename = path.name
+    variant_key = "lite" if "lite" in filename.lower() else "completa"
+    variant_label = "Lite" if variant_key == "lite" else "Completa"
+    variant_description = (
+        "Base reducida para pruebas y demos rápidas."
+        if variant_key == "lite"
+        else "Base completa con el catálogo y señales originales."
+    )
+    return {
+        "path": str(path),
+        "filename": filename,
+        "variant": variant_key,
+        "variant_label": variant_label,
+        "variant_description": variant_description,
+    }
+
+
+_ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
+    {
+        "id": "hybrid",
+        "name": "Motor híbrido",
+        "description": "Combina estrategias según tu historial para priorizar la señal más fuerte.",
+    },
+    {
+        "id": "pairs",
+        "name": "Co-ocurrencia (release_pairs)",
+        "description": (
+            "Aprovecha discos que suelen aparecer juntos cuando tenés pocas "
+            "calificaciones positivas."
+        ),
+    },
+    {
+        "id": "content",
+        "name": "Perfiles de contenido",
+        "description": (
+            "Utiliza tus géneros y artistas mejor puntuados para encontrar " "lanzamientos afines."
+        ),
+    },
+    {
+        "id": "popular",
+        "name": "Popularidad",
+        "description": (
+            "Rellena con lanzamientos populares que todavía no viste cuando " "faltan candidatos."
+        ),
+    },
+    {
+        "id": "random",
+        "name": "Exploración aleatoria",
+        "description": (
+            "Agrega muestras controladas para descubrir discos fuera de tu " "zona habitual."
+        ),
+    },
+]
+
+
+def active_recommendation_systems() -> List[dict]:
+    """Devolver la lista de estrategias activas en el motor de recomendaciones."""
+
+    return list(_ACTIVE_RECOMMENDER_SYSTEMS)

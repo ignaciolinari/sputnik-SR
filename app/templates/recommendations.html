@@ -18,6 +18,16 @@
         </div>
     </div>
 
+    <div class="flex flex-wrap items-center gap-4 mb-8">
+        <div class="flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm shadow-sm">
+            <span class="uppercase text-xs font-semibold tracking-wide text-amber-700">Estado</span>
+            <span>Última actualización: {{ last_update_display }}</span>
+        </div>
+        <button type="button" data-action="show-system-info" class="px-4 py-2 border border-teal-500 text-teal-600 font-semibold text-sm rounded hover:bg-teal-50 focus:outline-none focus:ring-2 focus:ring-teal-500" aria-haspopup="dialog" aria-controls="info-modal">
+            Más información
+        </button>
+    </div>
+
     <section class="mb-8 bg-white border rounded-lg shadow-sm">
         <form method="get" class="p-4 flex flex-col gap-4">
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -166,6 +176,47 @@
     {% else %}
     <div class="p-6 bg-white border rounded text-slate-600">No encontramos discos nuevos para recomendar. Prob&aacute; limpiar tu historial.</div>
     {% endif %}
+    <div id="info-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
+        <div class="bg-white rounded-lg shadow-xl max-w-xl w-full p-6">
+            <div class="flex items-start justify-between mb-4">
+                <div>
+                    <h2 class="text-lg font-semibold text-slate-800">Información técnica</h2>
+                    <p class="text-sm text-slate-500">Resumen rápido del estado actual del sistema.</p>
+                </div>
+                <button type="button" class="text-slate-400 hover:text-slate-600" data-info-close aria-label="Cerrar">
+                    &#10005;
+                </button>
+            </div>
+            <div class="space-y-6 text-sm text-slate-600">
+                <section>
+                    <h3 class="text-sm font-semibold text-slate-700 mb-1">Base de datos</h3>
+                    <p class="mb-1">
+                        Actualmente se usa la base
+                        <span class="font-semibold text-slate-800">{{ database_info.variant_label }}</span>
+                        (<code class="font-mono text-xs">{{ database_info.filename }}</code>).
+                    </p>
+                    <p class="text-xs text-slate-500">{{ database_info.variant_description }}</p>
+                    <p class="mt-3 text-xs text-slate-500">
+                        Ruta: <span class="font-mono break-all">{{ database_info.path }}</span>
+                    </p>
+                </section>
+                <section>
+                    <h3 class="text-sm font-semibold text-slate-700 mb-2">Sistemas de recomendación activos</h3>
+                    <ul class="space-y-2">
+                        {% for system in active_recommenders %}
+                        <li class="border border-slate-200 rounded-lg p-3">
+                            <p class="text-sm font-semibold text-slate-700">{{ system.name }}</p>
+                            <p class="text-xs text-slate-500">{{ system.description }}</p>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </section>
+            </div>
+            <div class="mt-6 flex justify-end">
+                <button type="button" class="px-4 py-2 rounded bg-teal-500 text-white font-semibold hover:bg-teal-600" data-info-close>Entendido</button>
+            </div>
+        </div>
+    </div>
     <div id="reset-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
         <div class="bg-white rounded-lg shadow-xl max-w-sm w-full p-6">
             <h2 class="text-lg font-semibold text-slate-800 mb-2">Seguro que quieres limpiar el historial?</h2>
@@ -179,51 +230,87 @@
 
     <script>
         document.addEventListener("DOMContentLoaded", function () {
-            const modal = document.getElementById("reset-modal");
-            if (!modal) {
-                return;
-            }
-            const confirmButton = modal.querySelector('[data-reset-confirm="yes"]');
-            const cancelButton = modal.querySelector('[data-reset-confirm="no"]');
-            let pendingHref = null;
+            const resetModal = document.getElementById("reset-modal");
+            let pendingResetHref = null;
 
-            function showModal(href) {
-                pendingHref = href;
-                modal.classList.remove("hidden");
+            function showResetModal(href) {
+                pendingResetHref = href;
+                resetModal?.classList.remove("hidden");
             }
 
-            function hideModal() {
-                pendingHref = null;
-                modal.classList.add("hidden");
+            function hideResetModal() {
+                pendingResetHref = null;
+                resetModal?.classList.add("hidden");
             }
 
-            document.querySelectorAll('[data-action="reset-history"]').forEach(function (link) {
-                link.addEventListener("click", function (event) {
-                    event.preventDefault();
-                    const href = link.getAttribute("href");
-                    if (href) {
-                        showModal(href);
+            if (resetModal) {
+                const confirmButton = resetModal.querySelector('[data-reset-confirm="yes"]');
+                const cancelButton = resetModal.querySelector('[data-reset-confirm="no"]');
+
+                document.querySelectorAll('[data-action="reset-history"]').forEach(function (link) {
+                    link.addEventListener("click", function (event) {
+                        event.preventDefault();
+                        const href = link.getAttribute("href");
+                        if (href) {
+                            showResetModal(href);
+                        }
+                    });
+                });
+
+                confirmButton?.addEventListener("click", function () {
+                    if (pendingResetHref) {
+                        window.location.href = pendingResetHref;
                     }
                 });
+
+                cancelButton?.addEventListener("click", hideResetModal);
+
+                resetModal.addEventListener("click", function (event) {
+                    if (event.target === resetModal) {
+                        hideResetModal();
+                    }
+                });
+            }
+
+            const infoModal = document.getElementById("info-modal");
+            const infoTrigger = document.querySelector('[data-action="show-system-info"]');
+            const infoCloseButtons = infoModal ? Array.from(infoModal.querySelectorAll('[data-info-close]')) : [];
+
+            function showInfoModal() {
+                infoModal?.classList.remove("hidden");
+            }
+
+            function hideInfoModal() {
+                infoModal?.classList.add("hidden");
+            }
+
+            infoTrigger?.addEventListener("click", function (event) {
+                event.preventDefault();
+                showInfoModal();
             });
 
-            confirmButton?.addEventListener("click", function () {
-                if (pendingHref) {
-                    window.location.href = pendingHref;
-                }
+            infoCloseButtons.forEach(function (button) {
+                button.addEventListener("click", hideInfoModal);
             });
 
-            cancelButton?.addEventListener("click", hideModal);
-
-            modal.addEventListener("click", function (event) {
-                if (event.target === modal) {
-                    hideModal();
+            infoModal?.addEventListener("click", function (event) {
+                if (event.target === infoModal) {
+                    hideInfoModal();
                 }
             });
 
             document.addEventListener("keydown", function (event) {
-                if (event.key === "Escape" && !modal.classList.contains("hidden")) {
-                    hideModal();
+                if (event.key !== "Escape") {
+                    return;
+                }
+
+                if (infoModal && !infoModal.classList.contains("hidden")) {
+                    hideInfoModal();
+                    return;
+                }
+
+                if (resetModal && !resetModal.classList.contains("hidden")) {
+                    hideResetModal();
                 }
             });
         });

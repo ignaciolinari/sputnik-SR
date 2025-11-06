@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from flask import Flask
 from flask import abort
 from flask import make_response
@@ -14,6 +16,9 @@ from . import recommender
 
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "06/11/2025")
 
 
 RATING_CHOICES = [
@@ -143,6 +148,9 @@ def recommendations():
         user_ratings=user_ratings,
         rating_choices=RATING_CHOICES,
         next_url=next_url,
+        last_update_display=LAST_APP_UPDATE,
+        database_info=recommender.current_database_info(),
+        active_recommenders=recommender.active_recommendation_systems(),
     )
 
 
