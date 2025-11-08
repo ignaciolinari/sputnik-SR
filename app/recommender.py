@@ -437,6 +437,14 @@ def store_interaction(release_id: int, user_id: str, rating: float) -> None:
 def reset_user_history(user_id: str) -> None:
     """Eliminar todas las interacciones guardadas del usuario."""
     _execute("DELETE FROM interactions WHERE id_user = ?;", [user_id])
+    # Limpiar explicaciones y estrategias almacenadas en memoria
+    _LAST_EXPLANATIONS.pop(user_id, None)
+    _LAST_STRATEGY.pop(user_id, None)
+    # Limpiar explicaciones contextuales para este usuario
+    context_keys_to_remove = [key for key in _LAST_CONTEXT_EXPLANATIONS.keys() if key[0] == user_id]
+    for key in context_keys_to_remove:
+        _LAST_CONTEXT_EXPLANATIONS.pop(key, None)
+        _LAST_CONTEXT_STRATEGY.pop(key, None)
 
 
 def user_collection(user_id: str) -> List[dict]:
