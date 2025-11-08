@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 from flask import Flask
@@ -11,6 +12,7 @@ from flask import make_response
 from flask import redirect
 from flask import render_template
 from flask import request
+from flask import url_for
 
 from . import recommender
 
@@ -19,7 +21,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "06/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "08/11/2025")
 
 
 RATING_CHOICES = [
@@ -121,6 +123,7 @@ def recommendations():
     genre_id_raw = (request.args.get("genre_id") or "").strip()
     year_raw = (request.args.get("year") or "").strip()
     release_type = (request.args.get("type") or "").strip()
+    page_raw = (request.args.get("page") or "1").strip()
 
     genre_id = None
     if genre_id_raw:
@@ -136,6 +139,15 @@ def recommendations():
         except ValueError:
             release_year = None
 
+    current_page = 1
+    if page_raw:
+        try:
+            current_page_candidate = int(page_raw)
+        except ValueError:
+            current_page_candidate = 1
+        if current_page_candidate > 0:
+            current_page = current_page_candidate
+
     has_filters = any(
         [
             search_query,
@@ -147,15 +159,69 @@ def recommendations():
     )
 
     search_results = []
+    catalog_pagination = None
+    per_page = 36
+
     if has_filters:
+        total_results = recommender.count_catalog(
+            query=search_query or None,
+            artist=artist_filter or None,
+            genre_id=genre_id,
+            release_year=release_year,
+            release_type=release_type or None,
+        )
+        total_pages = math.ceil(total_results / per_page) if total_results else 0
+        if total_pages == 0:
+            current_page = 1
+        elif current_page > total_pages:
+            current_page = total_pages
+
+        offset = (current_page - 1) * per_page if total_results else 0
+
         search_results = recommender.search_catalog(
             query=search_query or None,
             artist=artist_filter or None,
             genre_id=genre_id,
             release_year=release_year,
             release_type=release_type or None,
-            limit=36,
+            limit=per_page,
+            offset=offset,
         )
+
+        query_params_base = request.args.to_dict(flat=True)
+
+        has_next = total_pages > 0 and current_page < total_pages
+        remaining_pages = max(0, total_pages - current_page)
+
+        next_page_url = None
+        if has_next:
+            next_query_params = dict(query_params_base)
+            next_query_params["page"] = current_page + 1
+            next_page_url = url_for("recommendations", **next_query_params)
+
+        has_prev = total_pages > 0 and current_page > 1
+        prev_page_url = None
+        if has_prev:
+            prev_query_params = dict(query_params_base)
+            prev_page = current_page - 1
+            if prev_page <= 1:
+                prev_query_params.pop("page", None)
+            else:
+                prev_query_params["page"] = prev_page
+            prev_page_url = url_for("recommendations", **prev_query_params)
+
+        if total_results > per_page:
+            catalog_pagination = {
+                "total_results": total_results,
+                "page": current_page,
+                "per_page": per_page,
+                "total_pages": total_pages,
+                "remaining_pages": remaining_pages,
+                "has_next": has_next,
+                "next_page_url": next_page_url,
+                "has_prev": has_prev,
+                "prev_page_url": prev_page_url,
+            }
 
     release_ids = recommender.recommend(user_id)
 
@@ -181,10 +247,17 @@ def recommendations():
     year_options = recommender.list_release_years()
     type_options = recommender.list_release_types()
 
-    query_string = request.query_string.decode()
-    next_url = request.path
-    if query_string:
-        next_url = f"{request.path}?{query_string}"
+    current_query_params = request.args.to_dict(flat=True)
+    if has_filters:
+        if current_page > 1 or "page" in current_query_params:
+            current_query_params["page"] = current_page
+    else:
+        current_query_params.pop("page", None)
+
+    if current_query_params:
+        next_url = url_for("recommendations", **current_query_params)
+    else:
+        next_url = request.path
 
     return render_template(
         "recommendations.html",
@@ -192,6 +265,7 @@ def recommendations():
         releases=releases,
         search_results=search_results,
         has_filters=has_filters,
+        catalog_pagination=catalog_pagination,
         rated_count=rated_count,
         seen_count=seen_count,
         explanations=explanations,
@@ -201,6 +275,7 @@ def recommendations():
             "genre_id": genre_id_raw,
             "year": year_raw,
             "type": release_type,
+            "page": str(current_page),
         },
         genre_options=genre_options,
         year_options=year_options,

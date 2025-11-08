@@ -14,7 +14,7 @@
         </h1>
         <div class="text-sm text-slate-600">
             {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
-            <a href="/reset" data-action="reset-history" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">limpiar historial</a>
+            <a href="/reset" data-action="reset-history" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">Limpiar historial</a>
         </div>
     </div>
 
@@ -80,7 +80,7 @@
 
     {% if has_filters %}
     <section class="mb-10">
-        <h2 class="text-lg font-semibold text-slate-800 mb-3">Resultados del catálogo</h2>
+        <h2 class="text-lg font-semibold text-slate-800 mb-3">Resultados del catálogo:</h2>
         {% if search_results %}
         <form method="post" action="/recomendaciones" class="space-y-4">
             <input type="hidden" name="next" value="{{ next_url }}" />
@@ -115,8 +115,21 @@
                 </div>
                 {% endfor %}
             </div>
-            <div class="flex justify-end">
-                <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Guardar puntajes</button>
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                {% if catalog_pagination and catalog_pagination.remaining_pages > 0 %}
+                <p class="text-sm text-slate-600">
+                    Quedan {{ catalog_pagination.remaining_pages }} {{ 'página' if catalog_pagination.remaining_pages == 1 else 'páginas' }} más ({{ catalog_pagination.total_results }} resultados totales).
+                </p>
+                {% endif %}
+                <div class="flex items-center gap-3">
+                    {% if catalog_pagination and catalog_pagination.has_prev and catalog_pagination.prev_page_url %}
+                    <a href="{{ catalog_pagination.prev_page_url }}" class="bg-slate-100 text-slate-700 font-semibold px-4 py-2 rounded hover:bg-slate-200">Página anterior</a>
+                    {% endif %}
+                    {% if catalog_pagination and catalog_pagination.has_next and catalog_pagination.next_page_url %}
+                    <a href="{{ catalog_pagination.next_page_url }}" class="bg-slate-100 text-slate-700 font-semibold px-4 py-2 rounded hover:bg-slate-200">Siguiente página</a>
+                    {% endif %}
+                    <button type="submit" class="bg-teal-500 text-white font-semibold px-4 py-2 rounded hover:bg-teal-600">Guardar puntajes</button>
+                </div>
             </div>
         </form>
         {% else %}
@@ -126,6 +139,7 @@
     {% endif %}
 
     {% if releases %}
+    <h2 class="text-lg font-semibold text-slate-800 mb-3{% if has_filters %} mt-10{% endif %}">Quizás te interesen algunas de estas recomendaciones:</h2>
     {% if explanations %}
     <div class="mb-4 p-4 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-900">
         <ul class="list-disc list-inside space-y-1">
@@ -252,7 +266,7 @@
     </div>
     <div id="reset-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
         <div class="bg-white rounded-lg shadow-xl max-w-sm w-full p-6">
-            <h2 class="text-lg font-semibold text-slate-800 mb-2">Seguro que quieres limpiar el historial?</h2>
+            <h2 class="text-lg font-semibold text-slate-800 mb-2">¿Seguro que querés limpiar el historial?</h2>
             <p class="text-sm text-slate-600 mb-6">Esta acci&oacute;n borrar&aacute; tus discos vistos y puntuados.</p>
             <div class="flex justify-end gap-3">
                 <button type="button" data-reset-confirm="no" class="px-4 py-2 rounded border border-slate-200 text-slate-600 hover:bg-slate-100">No</button>

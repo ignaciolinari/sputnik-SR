@@ -97,9 +97,11 @@ def test_search_catalog_applies_all_filters(monkeypatch: pytest.MonkeyPatch) -> 
         "%doom%",
         "%candlemass%",
         7,
+        7,
         1986,
         "lp",
         12,
+        0,
     ]
     assert captured["release_ids"] == [10, 20]
     assert [item["id_release"] for item in result] == [10, 20]
@@ -122,3 +124,34 @@ def test_search_catalog_handles_no_results(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert captured["release_ids"] == []
     assert result == []
+
+
+def test_count_catalog_returns_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_select(query: str, params: List[Any]) -> List[dict[str, Any]]:
+        captured["query"] = query
+        captured["params"] = params
+        return [{"total": 42}]
+
+    monkeypatch.setattr(recommender, "_select", fake_select)
+
+    total = recommender.count_catalog(
+        query="doom",
+        artist="candlemass",
+        genre_id=5,
+        release_year=1986,
+        release_type="LP",
+    )
+
+    assert "COUNT(DISTINCT r.id_release)" in captured["query"]
+    assert captured["params"] == [
+        "%doom%",
+        "%doom%",
+        "%candlemass%",
+        5,
+        5,
+        1986,
+        "lp",
+    ]
+    assert total == 42

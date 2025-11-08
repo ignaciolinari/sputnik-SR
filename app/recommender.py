@@ -1223,17 +1223,22 @@ def list_release_types() -> List[str]:
     return [str(row["release_type"]) for row in rows]
 
 
-def search_catalog(
+_CATALOG_BASE_FROM = """
+    FROM releases AS r
+    JOIN artists AS a ON a.id_artist = r.artist_id
+    LEFT JOIN release_genres AS rg ON rg.id_release = r.id_release
+    LEFT JOIN artist_genres AS ag ON ag.id_artist = a.id_artist
+"""
+
+
+def _build_catalog_filters(
     query: str | None = None,
     *,
     artist: str | None = None,
     genre_id: int | None = None,
     release_year: int | None = None,
     release_type: str | None = None,
-    limit: int = 50,
-) -> List[dict]:
-    """Buscar lanzamientos del catálogo aplicando filtros opcionales."""
-
+) -> tuple[str, List[object]]:
     conditions: List[str] = []
     parameters: List[object] = []
 
@@ -1247,8 +1252,8 @@ def search_catalog(
         parameters.append(f"%{artist.lower()}%")
 
     if genre_id is not None:
-        conditions.append("rg.id_genre = ?")
-        parameters.append(int(genre_id))
+        conditions.append("(rg.id_genre = ? OR ag.id_genre = ?)")
+        parameters.extend([int(genre_id), int(genre_id)])
     if release_year is not None:
         conditions.append("r.release_year = ?")
         parameters.append(int(release_year))
@@ -1261,13 +1266,33 @@ def search_catalog(
     if conditions:
         where_clause = "WHERE " + " AND ".join(conditions)
 
+    return where_clause, parameters
+
+
+def search_catalog(
+    query: str | None = None,
+    *,
+    artist: str | None = None,
+    genre_id: int | None = None,
+    release_year: int | None = None,
+    release_type: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> List[dict]:
+    """Buscar lanzamientos del catálogo aplicando filtros opcionales."""
+
+    where_clause, parameters = _build_catalog_filters(
+        query,
+        artist=artist,
+        genre_id=genre_id,
+        release_year=release_year,
+        release_type=release_type,
+    )
+
     sql = """
         SELECT DISTINCT r.id_release
-        FROM releases AS r
-        JOIN artists AS a ON a.id_artist = r.artist_id
-        LEFT JOIN release_genres AS rg ON rg.id_release = r.id_release
-        LEFT JOIN genres AS g ON g.id_genre = rg.id_genre
     """
+    sql += _CATALOG_BASE_FROM
 
     if where_clause:
         sql += f" {where_clause}"
@@ -1279,13 +1304,48 @@ def search_catalog(
             (r.avg_rating IS NULL),
             r.avg_rating DESC,
             r.title ASC
-        LIMIT ?;
+        LIMIT ? OFFSET ?;
     """
 
-    rows = _select(sql, parameters + [limit])
+    rows = _select(sql, parameters + [limit, max(int(offset), 0)])
 
     release_ids = [int(row["id_release"]) for row in rows]
     return release_details(release_ids)
+
+
+def count_catalog(
+    query: str | None = None,
+    *,
+    artist: str | None = None,
+    genre_id: int | None = None,
+    release_year: int | None = None,
+    release_type: str | None = None,
+) -> int:
+    """Contar la cantidad total de lanzamientos que cumplen con los filtros."""
+
+    where_clause, parameters = _build_catalog_filters(
+        query,
+        artist=artist,
+        genre_id=genre_id,
+        release_year=release_year,
+        release_type=release_type,
+    )
+
+    sql = """
+        SELECT COUNT(DISTINCT r.id_release) AS total
+    """
+    sql += _CATALOG_BASE_FROM
+
+    if where_clause:
+        sql += f" {where_clause}"
+
+    rows = _select(sql, parameters)
+    if not rows:
+        return 0
+    total = rows[0]["total"]
+    if total is None:
+        return 0
+    return int(total)
 
 
 def current_database_info() -> dict:

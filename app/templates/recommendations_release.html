@@ -11,7 +11,7 @@
         <h1 class="text-2xl font-bold text-slate-800">{{ release.title }} para {{ user_id }}</h1>
         <div class="text-sm text-slate-600">
             {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
-            <a href="/reset" data-action="reset-history" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">limpiar historial</a>
+            <a href="/reset" data-action="reset-history" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">Limpiar historial</a>
         </div>
     </div>
 
@@ -22,7 +22,7 @@
             <div class="p-4 flex-1 flex flex-col gap-3">
                 <h2 class="text-xl font-semibold text-slate-800">{{ release.title }}</h2>
                 <p class="text-sm text-slate-600">
-                    <a href="/artistas/{{ release.artist_id }}" class="hover:text-teal-600">{{ release.artist_name }}</a>
+                    <a href="/artistas/{{ release.artist_id }}" class="font-semibold hover:text-teal-600">{{ release.artist_name }}</a>
                     {% if release.release_year %} &middot; {{ release.release_year }}{% endif %}
                 </p>
                 {% if release.avg_rating %}
@@ -68,7 +68,7 @@
                             <a href="/recomendaciones/{{ item.id_release }}" class="hover:text-teal-600">{{ item.title }}</a>
                         </h4>
                         <p class="text-sm text-slate-600">
-                            <a href="/artistas/{{ item.artist_id }}" class="hover:text-teal-600">{{ item.artist_name }}</a>
+                            <a href="/artistas/{{ item.artist_id }}" class="font-semibold hover:text-teal-600">{{ item.artist_name }}</a>
                             {% if item.release_year %} &middot; {{ item.release_year }}{% endif %}
                         </p>
                         {% if item.avg_rating %}
@@ -103,7 +103,7 @@
 
     <div id="reset-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
         <div class="bg-white rounded-lg shadow-xl max-w-sm w-full p-6">
-            <h2 class="text-lg font-semibold text-slate-800 mb-2">Seguro que quieres limpiar el historial?</h2>
+            <h2 class="text-lg font-semibold text-slate-800 mb-2">¿Seguro que querés limpiar el historial?</h2>
             <p class="text-sm text-slate-600 mb-6">Esta acci&oacute;n borrar&aacute; tus discos vistos y puntuados.</p>
             <div class="flex justify-end gap-3">
                 <button type="button" data-reset-confirm="no" class="px-4 py-2 rounded border border-slate-200 text-slate-600 hover:bg-slate-100">No</button>
