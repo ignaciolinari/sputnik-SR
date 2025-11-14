@@ -6,11 +6,12 @@ Este documento describe todas las estrategias de recomendación implementadas en
 
 1. [Motor Híbrido](#motor-híbrido)
 2. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
-3. [Perfiles de Contenido](#perfiles-de-contenido)
-4. [Popularidad](#popularidad)
-5. [Exploración Aleatoria](#exploración-aleatoria)
-6. [Recomendaciones Contextuales](#recomendaciones-contextuales)
-7. [Métricas de Evaluación](#métricas-de-evaluación)
+3. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
+4. [Perfiles de Contenido](#perfiles-de-contenido)
+5. [Popularidad](#popularidad)
+6. [Exploración Aleatoria](#exploración-aleatoria)
+7. [Recomendaciones Contextuales](#recomendaciones-contextuales)
+8. [Métricas de Evaluación](#métricas-de-evaluación)
 
 ---
 
@@ -31,8 +32,14 @@ El motor híbrido es la estrategia principal que combina todas las demás estrat
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
-3. **Con >8 calificaciones positivas:**
+3. **Con 9-19 calificaciones positivas:**
    - Prioriza perfiles de contenido (`recommend_content_based`)
+   - Si faltan candidatos, completa con popularidad
+   - Si aún faltan, agrega aleatorios
+
+4. **Con ≥20 calificaciones positivas:**
+   - Prioriza factorización matricial (`recommend_nmf`) si embeddings disponibles
+   - Si NMF no disponible, usa perfiles de contenido como fallback
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
@@ -155,11 +162,128 @@ Score total para X = 32.3 + 13.3 = 45.6
 
 ---
 
+## Factorización Matricial (NMF)
+
+**Función:** `recommend_nmf(user_id, limit=9)`
+
+Sistema basado en **Non-negative Matrix Factorization (NMF)** que aprende patrones latentes de las preferencias de los usuarios. Se activa automáticamente para usuarios con ≥20 calificaciones positivas cuando los embeddings están disponibles.
+
+### Construcción de Embeddings (Offline)
+
+**Script:** `offline_recommender/build_nmf_embeddings.py`
+
+#### Proceso:
+
+1. **Filtrado de datos:**
+   - Filtra interacciones con `rating >= 3.0` (configurable)
+   - Incluye solo usuarios con ≥10 calificaciones positivas (configurable)
+   - Incluye solo releases con ≥5 calificaciones positivas (configurable)
+
+2. **Construcción de matriz sparse:**
+   - Crea matriz usuario-ítem en formato CSR (Compressed Sparse Row)
+   - Solo almacena valores no-cero (muy eficiente en memoria)
+   - Típicamente usa ~50-100 MB para datasets grandes
+
+3. **Entrenamiento NMF:**
+   - Factoriza matriz como: `matriz ≈ user_embeddings @ item_embeddings.T`
+   - Aprende factores latentes (default: 50 componentes)
+   - Usa regularización L1/L2 para evitar sobreajuste
+   - Converge típicamente en 50-100 iteraciones
+
+4. **Almacenamiento:**
+   - Guarda embeddings de usuarios en tabla `user_embeddings`
+   - Guarda embeddings de releases en tabla `release_embeddings`
+   - Cada embedding es un vector de factores latentes (JSON array)
+
+### Recomendación en Tiempo Real
+
+#### Algoritmo `recommend_nmf()`:
+
+1. **Carga embedding del usuario:**
+   - Busca en `user_embeddings` el embedding del usuario
+   - Si no existe, retorna lista vacía (fallback a content-based)
+
+2. **Calcula similitud coseno:**
+   - Para cada release con embedding disponible:
+     ```python
+     similarity = dot(user_embedding, release_embedding) /
+                  (norm(user_embedding) * norm(release_embedding))
+     ```
+
+3. **Filtra y ordena:**
+   - Excluye releases ya vistos o calificados por el usuario
+   - Ordena por similitud descendente
+   - Retorna top-k recomendaciones
+
+### Configuración Actual
+
+- **Umbral de activación:** `min_nmf_signals = 20` (usuarios con ≥20 calificaciones positivas)
+- **Componentes latentes:** `n_components = 50` (configurable en construcción)
+- **Filtros de datos:** `min_user_ratings = 10`, `min_release_ratings = 5` (configurable)
+- **Iteraciones máximas:** `max_iter = 200` (típicamente converge antes)
+
+### Ejemplo Práctico
+
+**Usuario con 25 calificaciones positivas:**
+
+1. Sistema híbrido detecta que tiene ≥20 calificaciones
+2. Intenta usar `recommend_nmf()`
+3. Carga embedding del usuario (vector de 50 factores)
+4. Calcula similitud con ~109k releases con embeddings
+5. Retorna top 9 recomendaciones más similares
+
+**Si embeddings no disponibles:**
+- Fallback automático a `recommend_content_based()`
+- Sistema sigue funcionando normalmente
+
+### Ventajas
+
+- ✅ **Captura patrones complejos**: Los factores latentes descubren relaciones no obvias
+- ✅ **Muy eficiente en memoria**: Matrices sparse usan ~50-100 MB vs ~17 GB densas
+- ✅ **Escalable**: Inferencia rápida (<100ms) incluso con muchos releases
+- ✅ **Mejor para usuarios activos**: Funciona mejor con más datos del usuario
+- ✅ **Diversidad**: Puede descubrir releases fuera de géneros/artistas obvios
+
+### Limitaciones
+
+- ⚠️ **Requiere embeddings precomputados**: Deben generarse offline periódicamente
+- ⚠️ **Cold start**: No funciona para usuarios nuevos (<20 calificaciones)
+- ⚠️ **Depende de calidad de datos**: Requiere suficientes interacciones positivas
+- ⚠️ **Menos interpretable**: Los factores latentes no tienen significado directo
+
+### Actualización Periódica
+
+Los embeddings deben reconstruirse cuando haya nuevas interacciones:
+
+```bash
+# Reconstruir embeddings (típicamente semanal)
+python -m offline_recommender.build_nmf_embeddings \
+    --n-components 50 \
+    --min-user-ratings 10 \
+    --min-release-ratings 5 \
+    --verbose
+```
+
+**Tiempo estimado**: 1-2 minutos para datasets medianos/grandes
+
+### Comparación con Otras Estrategias
+
+| Aspecto | NMF | Content-based | Release Pairs |
+|---------|-----|---------------|--------------|
+| **Complejidad** | Alta | Media | Baja |
+| **Cold start** | Malo | Bueno | Bueno |
+| **Usuarios activos** | Excelente | Bueno | Regular |
+| **Diversidad** | Alta | Media | Baja |
+| **Interpretabilidad** | Baja | Alta | Media |
+| **Memoria** | Media | Baja | Baja |
+
+---
+
 ## Perfiles de Contenido
 
 **Función:** `recommend_content_based(user_id, limit=9)`
 
-Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene más de 8 calificaciones positivas.
+Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene entre 9-19 calificaciones positivas, o como fallback si NMF no está disponible para usuarios con ≥20 calificaciones.
 
 ### Construcción del Perfil (`_user_profile`)
 
@@ -471,6 +595,7 @@ python -m offline_recommender.evaluate_recommender \
 
 - **`positive_rating_threshold`**: `3.0` - Rating mínimo para considerar positiva una interacción
 - **`max_pairs_signals`**: `8` - Umbral para cambiar de co-ocurrencia a contenido
+- **`min_nmf_signals`**: `20` - Umbral para activar NMF (usuarios con ≥20 calificaciones positivas)
 - **`genre_weight`**: `1.0` - Peso de géneros en scoring de contenido
 - **`artist_weight`**: `0.8` - Peso de artistas en scoring de contenido
 - **`popularity_prior`**: `0.3` - Peso del factor de popularidad
@@ -488,10 +613,66 @@ python -m offline_recommender.evaluate_recommender \
 |------------|---------------|-----------------|-------------|
 | **Motor Híbrido** | Siempre (principal) | Alta | Alta |
 | **Co-ocurrencia** | ≤8 calificaciones | Media-Alta | Media |
-| **Contenido** | >8 calificaciones | Alta | Media |
+| **NMF** | ≥20 calificaciones | Muy Alta | Alta |
+| **Contenido** | 9-19 calificaciones | Alta | Media |
 | **Popularidad** | Fallback | Baja | Baja |
 | **Aleatorio** | Último fallback | Ninguna | Baja |
 | **Contextual** | Página de disco | Media | Media |
+
+---
+
+## Estrategias Futuras
+
+### Filtrado Colaborativo Basado en Usuarios (User-Based CF)
+
+**Estado**: No implementado - Consideración futura
+
+El sistema actual utiliza filtrado colaborativo basado en items (item-based CF) a través de la tabla `release_pairs`. Una posible extensión sería implementar filtrado colaborativo basado en usuarios (user-based CF).
+
+#### Concepto
+
+En lugar de encontrar discos similares a los que el usuario calificó (item-based), user-based CF encuentra usuarios similares al usuario objetivo y recomienda discos que esos usuarios similares calificaron positivamente.
+
+#### Ventajas Potenciales
+
+- **Descubrimiento más diverso**: Puede cruzar géneros y encontrar relaciones indirectas entre discos
+- **Mejor para usuarios con historial largo**: Aprovecha las preferencias de usuarios similares con más datos
+- **Adaptación a cambios de gusto**: Al recalcular similitudes periódicamente, puede reflejar cambios en preferencias
+
+#### Desventajas y Consideraciones
+
+- **Escalabilidad**: Requiere calcular y mantener similitudes usuario-usuario (matriz O(n²) usuarios)
+- **Dependencia de overlap**: Necesita suficiente overlap entre usuarios para encontrar vecinos útiles
+- **Cold start**: No funciona bien para usuarios nuevos sin historial suficiente
+- **Complejidad operativa**: Requiere mantenimiento periódico de similitudes y estrategias de caching
+
+#### Cuándo Considerar Implementación
+
+User-based CF sería beneficioso si:
+- Hay suficiente overlap promedio entre usuarios (≥15-20% Jaccard similarity)
+- Existe un número significativo de usuarios con historial largo (≥20-50 calificaciones positivas)
+- La densidad de la matriz usuario-ítem es suficiente para encontrar vecinos útiles
+- Se puede mantener la infraestructura para precomputar similitudes offline
+
+#### Implementación Sugerida (si se decide implementar)
+
+1. **Precomputación offline**: Similar a `release_pairs`, construir tabla `user_similarities` con:
+   - Similitud coseno o Pearson entre vectores de ratings de usuarios
+   - Top-K vecinos más similares por usuario
+   - Solo para usuarios con suficiente historial (≥20 calificaciones positivas)
+
+2. **Estrategia híbrida**:
+   - Usar user-based CF solo para usuarios con ≥50 calificaciones positivas
+   - Mantener item-based como estrategia principal para el resto
+   - Combinar ambas señales para usuarios con historial muy largo
+
+3. **Script de análisis**: `offline_recommender/analyze_user_cf_potential.py` puede evaluar si la implementación sería beneficiosa
+
+#### Referencias Técnicas
+
+- Algoritmo: Encontrar K usuarios más similares usando similitud coseno/Pearson sobre ratings centrados
+- Optimización: Precomputar offline, cachear en memoria, actualizar periódicamente
+- Evaluación: Comparar NDCG@k con sistema actual antes de implementar en producción
 
 ---
 
@@ -499,5 +680,9 @@ python -m offline_recommender.evaluate_recommender \
 
 - Implementación: `app/recommender.py`
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
+- Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
 - Evaluación: `offline_recommender/evaluate_recommender.py`
 - Métricas: `app/metrics.py`
+- Análisis NMF: `docs/analisis-svd-nmf.md`
+- Guía NMF: `docs/guia-nmf.md`
+- Análisis de potencial user-based CF: `offline_recommender/analyze_user_cf_potential.py`

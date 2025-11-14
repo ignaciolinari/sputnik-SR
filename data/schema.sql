@@ -147,6 +147,20 @@ CREATE TABLE IF NOT EXISTS release_pairs (
     CHECK (id_release_1 <> id_release_2)
 );
 
+CREATE TABLE IF NOT EXISTS user_embeddings (
+    id_user       TEXT PRIMARY KEY REFERENCES users(id_user) ON DELETE CASCADE,
+    embedding_json TEXT NOT NULL,
+    n_factors     INTEGER NOT NULL CHECK (n_factors > 0),
+    last_updated  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_embeddings (
+    id_release    INTEGER PRIMARY KEY REFERENCES releases(id_release) ON DELETE CASCADE,
+    embedding_json TEXT NOT NULL,
+    n_factors     INTEGER NOT NULL CHECK (n_factors > 0),
+    last_updated  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS release_tracks (
     id_release       INTEGER NOT NULL REFERENCES releases(id_release) ON DELETE CASCADE,
     track_position   INTEGER NOT NULL CHECK (track_position > 0),

@@ -20,9 +20,16 @@ from typing import List
 from typing import Sequence
 
 
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+
+
 class Config:
     positive_rating_threshold: float = 3.0
     max_pairs_signals: int = 8
+    min_nmf_signals: int = 20  # Minimum positive ratings to use NMF
     genre_weight: float = 1.0
     artist_weight: float = 0.8
     popularity_prior: float = 0.3
@@ -1021,6 +1028,11 @@ def recommend_from_pairs(
 
 
 def recommend(user_id: str, limit: int = 9) -> List[int]:
+    # Limpiar cache de explicaciones/estrategia para este usuario al inicio
+    # para evitar mostrar explicaciones de otra base de datos o estado anterior
+    _LAST_EXPLANATIONS.pop(user_id, None)
+    _LAST_STRATEGY.pop(user_id, None)
+
     interactions = _user_interactions(user_id)
     positive_interactions = [
         interaction
@@ -1031,10 +1043,12 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
     if not positive_interactions:
         candidates = _popular_unseen_releases(user_id, limit)
         strategy = "popular"
+        explanations: List[str] = []
         if len(candidates) < limit:
             candidates.extend(_random_unseen_releases(user_id, limit))
             strategy = "popular_random"
         _cache_last_strategy(user_id, strategy)
+        _cache_last_explanation(user_id, explanations)  # Cachear explicaciones vacías también
         return list(dict.fromkeys(candidates))[:limit]
 
     explanations: List[str] = []
@@ -1044,6 +1058,19 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
         if candidates:
             explanations.append("Basado en discos que calificaste positivamente")
         _cache_last_strategy(user_id, "pairs")
+    elif len(positive_interactions) >= Config.min_nmf_signals:
+        # Try NMF first for users with sufficient history
+        nmf_candidates = recommend_nmf(user_id, limit=limit)
+        if nmf_candidates:
+            candidates = nmf_candidates
+            explanations.append("Basado en patrones latentes de tus preferencias")
+            _cache_last_strategy(user_id, "nmf")
+        else:
+            # Fallback to content-based if NMF not available
+            candidates = recommend_content_based(user_id, limit=limit, interactions=interactions)
+            if candidates:
+                explanations.append("Basado en tus géneros y artistas con mejor puntaje")
+            _cache_last_strategy(user_id, "content")
     else:
         candidates = recommend_content_based(user_id, limit=limit, interactions=interactions)
         if candidates:
@@ -1113,8 +1140,90 @@ def _diversify_by_artist(release_ids: Sequence[int], *, limit: int) -> List[int]
     return diversified
 
 
+def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
+    """Recomendar usando embeddings NMF precomputados.
+
+    Esta función requiere que los embeddings hayan sido precomputados usando
+    offline_recommender/build_nmf_embeddings.py.
+
+    Returns empty list if embeddings are not available or user has insufficient history.
+    """
+    if np is None:
+        return []
+
+    try:
+        rows = _select(
+            """
+            SELECT embedding_json, n_factors
+            FROM user_embeddings
+            WHERE id_user = ?;
+            """,
+            [user_id],
+        )
+
+        if not rows:
+            return []
+
+        user_embedding_json = rows[0]["embedding_json"]
+        n_factors = int(rows[0]["n_factors"])
+        user_embedding = json.loads(user_embedding_json)
+
+        if len(user_embedding) != n_factors:
+            return []
+
+        # Get all release embeddings
+        release_rows = _select(
+            """
+            SELECT id_release, embedding_json
+            FROM release_embeddings;
+            """,
+        )
+
+        if not release_rows:
+            return []
+
+        # Calculate cosine similarities
+        scores: Dict[int, float] = {}
+        user_vec = np.array(user_embedding, dtype=np.float32)
+        user_norm = np.linalg.norm(user_vec)
+
+        if user_norm == 0:
+            return []
+
+        seen_ids = _user_seen_release_ids(user_id)
+
+        for row in release_rows:
+            release_id = int(row["id_release"])
+            if release_id in seen_ids:
+                continue
+
+            release_embedding = json.loads(row["embedding_json"])
+            release_vec = np.array(release_embedding, dtype=np.float32)
+            release_norm = np.linalg.norm(release_vec)
+
+            if release_norm == 0:
+                continue
+
+            # Cosine similarity
+            similarity = np.dot(user_vec, release_vec) / (user_norm * release_norm)
+            scores[release_id] = float(similarity)
+
+        # Sort by similarity and return top-k
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        return [release_id for release_id, _ in ranked[:limit]]
+
+    except (json.JSONDecodeError, ValueError, KeyError, ImportError):
+        # Silently fail if embeddings not available or numpy not installed
+        return []
+
+
 def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int]:
     """Recomendar lanzamientos vinculados a un lanzamiento dado, excluyendo los vistos."""
+
+    # Limpiar cache contextual para este usuario/release al inicio
+    context_key = (user_id, release_id)
+    _LAST_CONTEXT_EXPLANATIONS.pop(context_key, None)
+    _LAST_CONTEXT_STRATEGY.pop(context_key, None)
 
     seen_ids = _user_seen_release_ids(user_id)
 
@@ -1347,7 +1456,7 @@ def releases_by_artist(artist_id: int) -> List[dict]:
 
 
 @functools.lru_cache(maxsize=1)
-def list_genres(limit: int = 200) -> tuple:
+def list_genres(limit: int = 200) -> List[dict]:
     """Devolver una lista ordenada de géneros disponibles."""
     rows = _select(
         """
@@ -1358,17 +1467,18 @@ def list_genres(limit: int = 200) -> tuple:
         """,
         [limit],
     )
-    return tuple(
+    result = [
         {
             "id_genre": int(row["id_genre"]),
             "name": row["name"],
         }
         for row in rows
-    )
+    ]
+    return result
 
 
 @functools.lru_cache(maxsize=1)
-def list_release_years(limit: int = 120) -> tuple:
+def list_release_years(limit: int = 120) -> List[int]:
     """Listar años de lanzamiento disponibles ordenados de forma descendente."""
     rows = _select(
         """
@@ -1380,11 +1490,11 @@ def list_release_years(limit: int = 120) -> tuple:
         """,
         [limit],
     )
-    return tuple(int(row["release_year"]) for row in rows)
+    return [int(row["release_year"]) for row in rows]
 
 
 @functools.lru_cache(maxsize=1)
-def list_release_types() -> tuple:
+def list_release_types() -> List[str]:
     """Listar los tipos de lanzamiento disponibles (LP, EP, etc)."""
     rows = _select(
         """
@@ -1394,7 +1504,7 @@ def list_release_types() -> tuple:
         ORDER BY release_type ASC;
         """
     )
-    return tuple(str(row["release_type"]) for row in rows)
+    return [str(row["release_type"]) for row in rows]
 
 
 _CATALOG_BASE_FROM = """
@@ -1574,6 +1684,14 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "description": (
             "Aprovecha discos que suelen aparecer juntos cuando tenés hasta "
             "8 calificaciones positivas."
+        ),
+    },
+    {
+        "id": "nmf",
+        "name": "Factorización matricial (NMF)",
+        "description": (
+            "Usa patrones latentes aprendidos de tus preferencias cuando tenés "
+            "20 o más calificaciones positivas."
         ),
     },
     {
