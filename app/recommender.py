@@ -194,6 +194,20 @@ def _variant_path_from_hint(variant: str | None) -> Path | None:
     normalized = _normalize_variant(variant)
     if normalized in _VARIANT_DEFAULTS:
         return _VARIANT_DEFAULTS[normalized]
+
+    # Detectar nombres de archivo comunes que deberían mapearse a variantes
+    # Esto previene que se cree sputnik.lite.db en lugar de sputnik_lite.db
+    filename = Path(variant).name.lower()
+
+    # Detectar variantes lite por nombre de archivo
+    if "lite" in filename and filename.endswith(".db"):
+        if "sputnik" in filename or filename == "lite.db":
+            return _VARIANT_DEFAULTS["lite"]
+
+    # Detectar variantes full por nombre de archivo
+    if filename in ("sputnik.db", "full.db"):
+        return _VARIANT_DEFAULTS["full"]
+
     candidate = Path(variant).expanduser()
     if not candidate.is_absolute():
         candidate = (_DATA_DIR / candidate).resolve()
@@ -361,7 +375,12 @@ def _connect() -> sqlite3.Connection:
     db_path = _resolve_database_path()
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
+    # Optimizaciones de rendimiento
     connection.execute("PRAGMA foreign_keys = ON;")
+    connection.execute("PRAGMA journal_mode = WAL;")  # Write-Ahead Logging para mejor concurrencia
+    connection.execute("PRAGMA synchronous = NORMAL;")  # Balance entre seguridad y rendimiento
+    connection.execute("PRAGMA cache_size = -64000;")  # 64MB cache (negativo = KB)
+    connection.execute("PRAGMA temp_store = MEMORY;")  # Usar memoria para temp tables
     return connection
 
 
@@ -441,9 +460,34 @@ def store_interaction(release_id: int, user_id: str, rating: float) -> None:
     )
 
 
+def store_interactions_batch(interactions: List[tuple[int, str, float]]) -> None:
+    """Insertar o actualizar múltiples calificaciones en una sola transacción.
+
+    Args:
+        interactions: Lista de tuplas (release_id, user_id, rating)
+    """
+    if not interactions:
+        return
+    with _connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO interactions (id_release, id_user, rating, rating_date)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT (id_release, id_user)
+            DO UPDATE SET
+                rating = excluded.rating,
+                rating_date = datetime('now');
+            """,
+            [(release_id, user_id, float(rating)) for release_id, user_id, rating in interactions],
+        )
+        connection.commit()
+
+
 def reset_user_history(user_id: str) -> None:
     """Eliminar todas las interacciones guardadas del usuario."""
     _execute("DELETE FROM interactions WHERE id_user = ?;", [user_id])
+    # Eliminar embedding NMF del usuario si existe (ya no tiene sentido sin interacciones)
+    _execute("DELETE FROM user_embeddings WHERE id_user = ?;", [user_id])
     # Limpiar explicaciones y estrategias almacenadas en memoria
     _LAST_EXPLANATIONS.pop(user_id, None)
     _LAST_STRATEGY.pop(user_id, None)
@@ -1052,6 +1096,7 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
         return list(dict.fromkeys(candidates))[:limit]
 
     explanations: List[str] = []
+    candidates: List[int] = []  # Inicializar para evitar errores si ninguna rama se ejecuta
 
     if len(positive_interactions) <= Config.max_pairs_signals:
         candidates = recommend_from_pairs(user_id, limit=limit, interactions=interactions)
@@ -1141,16 +1186,38 @@ def _diversify_by_artist(release_ids: Sequence[int], *, limit: int) -> List[int]
 
 
 def user_has_nmf_embedding(user_id: str) -> bool:
-    """Verificar si el usuario tiene un embedding NMF disponible."""
+    """Verificar si el usuario tiene un embedding NMF disponible y válido."""
     rows = _select(
         """
-        SELECT COUNT(*) as count
+        SELECT embedding_json, n_factors
         FROM user_embeddings
         WHERE id_user = ?;
         """,
         [user_id],
     )
-    return len(rows) > 0 and rows[0]["count"] > 0
+
+    if not rows:
+        return False
+
+    # Verificar que el embedding es válido (tiene el formato correcto)
+    try:
+        embedding_json = rows[0]["embedding_json"]
+        n_factors = int(rows[0]["n_factors"])
+        embedding = json.loads(embedding_json)
+
+        # Verificar que el embedding tiene la longitud correcta
+        if not isinstance(embedding, list) or len(embedding) != n_factors:
+            return False
+
+        # Verificar que hay releases con embeddings disponibles
+        # (no tiene sentido tener un embedding de usuario si no hay releases)
+        release_count_rows = _select("SELECT COUNT(*) as count FROM release_embeddings")
+        if release_count_rows and release_count_rows[0]["count"] > 0:
+            return True
+
+        return False
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        return False
 
 
 def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
@@ -1184,13 +1251,31 @@ def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
         if len(user_embedding) != n_factors:
             return []
 
-        # Get all release embeddings
-        release_rows = _select(
-            """
-            SELECT id_release, embedding_json
-            FROM release_embeddings;
-            """,
-        )
+        # Get release embeddings (excluding seen releases for efficiency)
+        seen_ids = _user_seen_release_ids(user_id)
+
+        # SQLite has a limit on number of parameters (typically 999)
+        # For large seen sets, load all and filter in Python
+        SQLITE_MAX_PARAMS = 999
+        if len(seen_ids) > 0 and len(seen_ids) <= SQLITE_MAX_PARAMS:
+            # Use SQL to exclude seen releases when feasible
+            placeholders = ",".join("?" for _ in seen_ids)
+            release_rows = _select(
+                f"""
+                SELECT id_release, embedding_json
+                FROM release_embeddings
+                WHERE id_release NOT IN ({placeholders});
+                """,
+                list(seen_ids),
+            )
+        else:
+            # Load all and filter in Python for very large or empty seen sets
+            release_rows = _select(
+                """
+                SELECT id_release, embedding_json
+                FROM release_embeddings;
+                """,
+            )
 
         if not release_rows:
             return []
@@ -1203,14 +1288,18 @@ def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
         if user_norm == 0:
             return []
 
-        seen_ids = _user_seen_release_ids(user_id)
-
         for row in release_rows:
             release_id = int(row["id_release"])
-            if release_id in seen_ids:
+            # Filter seen releases if we loaded all (for large seen sets)
+            if len(seen_ids) > SQLITE_MAX_PARAMS:
+                if release_id in seen_ids:
+                    continue
+
+            try:
+                release_embedding = json.loads(row["embedding_json"])
+            except (json.JSONDecodeError, TypeError):
                 continue
 
-            release_embedding = json.loads(row["embedding_json"])
             release_vec = np.array(release_embedding, dtype=np.float32)
             release_norm = np.linalg.norm(release_vec)
 

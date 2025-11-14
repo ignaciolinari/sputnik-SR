@@ -265,13 +265,14 @@ pre-commit run --all-files
 
 ## Notas sobre recomendaciones (heurística actual)
 
-- Página principal: evalúa las señales del usuario y elige entre tres estrategias (
-  - **Co-ocurrencia** (`release_pairs`) para usuarios con pocas calificaciones positivas.
-  - **Perfiles de contenido** (géneros y artistas) para perfiles con mayor historial.
+- Página principal: evalúa las señales del usuario y elige entre múltiples estrategias según el historial:
+  - **Co-ocurrencia** (`release_pairs`) para usuarios con ≤8 calificaciones positivas.
+  - **Perfiles de contenido** (géneros y artistas) para usuarios con 9-19 calificaciones positivas.
+  - **Factorización matricial (NMF)** para usuarios con ≥20 calificaciones positivas (requiere embeddings precomputados).
   - **Popularidad** como fallback inicial.
   - Si aún quedan slots vacíos, mezcla candidatos populares y aleatorios para diversificar.
-  )
 - Página de contexto: ensambla candidatos combinando `release_recommendations`, vecinos por `release_pairs`, otros lanzamientos del artista y populares no vistos.
+- Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding NMF desde la interfaz web usando el botón "Generar NMF" o "Actualizar NMF".
 - Todas las interacciones se persisten en `interactions` con `rating` en [0, 5] y `rating_date = now()`.
 
 ## Sistema de recomendación híbrido
@@ -280,14 +281,17 @@ pre-commit run --all-files
 - Estrategias implementadas:
   - `recommend_from_pairs`: mezcla señales de co-ocurrencia ponderando rating y recencia.
   - `recommend_content_based`: perfiles de usuario por géneros y artistas con prior de popularidad.
+  - `recommend_nmf`: factorización matricial usando embeddings precomputados (NMF).
   - `recommend_random`: muestreo uniforme de lanzamientos no vistos para exploración controlada.
 - Lógica híbrida en `recommend`:
   - Usuarios sin ratings → populares + aleatorios.
-  - Hasta 5 ratings positivos → co-ocurrencia.
-  - Más de 5 → contenido.
+  - Hasta 8 ratings positivos → co-ocurrencia.
+  - 9-19 ratings positivos → contenido.
+  - 20+ ratings positivos → NMF (con fallback a contenido si embeddings no disponibles).
   - Diversificación por artista para evitar repeticiones.
 - `recommend_context` sigue la misma filosofía: recomendaciones directas, pares, artista y fallback popular.
 - La app muestra explicaciones en la UI y expone `last_strategy` / `last_context_strategy` para instrumentación.
+- Los usuarios con ≥20 calificaciones positivas pueden actualizar su embedding NMF desde la interfaz web.
 
 ### Rebuilding de co-ocurrencias
 
@@ -303,11 +307,28 @@ pre-commit run --all-files
 
 - Ajusta el umbral de rating y el mínimo de pares según el tamaño de la base.
 
+### Construcción de embeddings NMF
+
+- Tablas `user_embeddings` y `release_embeddings` almacenan vectores de factores latentes.
+- Script `offline_recommender/build_nmf_embeddings.py` construye embeddings de releases (requerido para usar NMF):
+
+    ```bash
+    python offline_recommender/build_nmf_embeddings.py \
+        --database data/sputnik.db \
+        --n-components 50 \
+        --min-user-ratings 10 \
+        --min-release-ratings 5
+    ```
+
+- Los usuarios pueden actualizar sus embeddings individuales desde la interfaz web (botón "Generar NMF" o "Actualizar NMF").
+- Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema.
+
 ### Configuración rápida de hiperparámetros
 
 - La clase `Config` permite modificar sin tocar la lógica:
-  - `positive_rating_threshold`: rating mínimo para considerar “señal positiva”.
-  - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares.
+  - `positive_rating_threshold`: rating mínimo para considerar "señal positiva" (default: 3.0).
+  - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares (default: 8).
+  - `min_nmf_signals`: mínimo de ratings positivos para activar NMF (default: 20).
   - `genre_weight` / `artist_weight` / `popularity_prior`: balance de cada componente en el score content-based.
   - `recency_log_base`: logaritmo usado para atenuar la recencia.
   - `candidate_pool_multiplier`: expande la búsqueda de candidatos en contenido.
@@ -338,6 +359,7 @@ Modificá estos valores al inicio del módulo para experimentar sin reescribir f
 - Reporta métricas promedio para:
   - Híbrido (`recommend`)
   - Co-ocurrencia (`recommend_from_pairs`)
+  - NMF (`recommend_nmf`)
   - Contenido (`recommend_content_based`)
   - Aleatorio (`recommend_random`)
   - Popularidad (`_popular_unseen_releases`)

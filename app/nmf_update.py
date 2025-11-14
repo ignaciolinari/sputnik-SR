@@ -18,8 +18,8 @@ LOGGER = logging.getLogger("nmf_update")
 def update_user_embedding(
     connection: sqlite3.Connection,
     user_id: str,
-    min_rating: float = 3.0,
-    n_components: int = 50,
+    min_rating: float = 3.0,  # Debe coincidir con Config.positive_rating_threshold
+    n_components: int = 50,  # Se detecta automáticamente desde los embeddings existentes
 ) -> bool:
     """Actualizar el embedding NMF de un usuario específico.
 
@@ -44,7 +44,7 @@ def update_user_embedding(
     if connection.row_factory is None:
         connection.row_factory = sqlite3.Row
 
-    # Verificar que hay embeddings de releases disponibles
+    # Verificar que hay embeddings de releases disponibles y detectar n_factors
     release_count_row = connection.execute(
         "SELECT COUNT(*) as count FROM release_embeddings"
     ).fetchone()
@@ -53,6 +53,29 @@ def update_user_embedding(
     if release_count == 0:
         LOGGER.warning("No hay embeddings de releases disponibles")
         return False
+
+    # Verificar que hay suficientes releases con embeddings antes de continuar
+    # (necesitamos al menos algunos para calcular un embedding útil)
+    if release_count < 10:
+        LOGGER.warning(
+            "Muy pocos releases con embeddings disponibles: %d (mínimo recomendado: 10)",
+            release_count,
+        )
+        # Continuamos de todas formas, pero es una advertencia
+
+    # Detectar n_factors automáticamente desde los embeddings existentes
+    n_factors_row = connection.execute(
+        "SELECT n_factors FROM release_embeddings LIMIT 1"
+    ).fetchone()
+    if n_factors_row and n_factors_row["n_factors"]:
+        detected_n_factors = int(n_factors_row["n_factors"])
+        if detected_n_factors != n_components:
+            LOGGER.info(
+                "Ajustando n_components de %d a %d basado en embeddings existentes",
+                n_components,
+                detected_n_factors,
+            )
+            n_components = detected_n_factors
 
     # Obtener calificaciones positivas del usuario
     cursor = connection.execute(
@@ -66,8 +89,17 @@ def update_user_embedding(
     )
     rows = cursor.fetchall()
 
-    if len(rows) < 10:  # Mínimo razonable para calcular embedding
-        LOGGER.warning("Usuario tiene muy pocas calificaciones positivas: %d", len(rows))
+    # Usar el mismo umbral que el sistema de recomendación para consistencia
+    # Importar aquí para evitar dependencia circular
+    from .recommender import Config
+
+    min_required = Config.min_nmf_signals
+    if len(rows) < min_required:
+        LOGGER.warning(
+            "Usuario tiene muy pocas calificaciones positivas: %d (requerido: %d)",
+            len(rows),
+            min_required,
+        )
         return False
 
     # Cargar embeddings de releases que el usuario calificó
@@ -93,6 +125,17 @@ def update_user_embedding(
         LOGGER.warning("No se encontraron embeddings para los releases calificados")
         return False
 
+    # Verificar que tenemos suficientes embeddings para calcular un perfil útil
+    if len(embedding_rows) < 5:
+        LOGGER.warning(
+            (
+                "Muy pocos embeddings disponibles para los releases calificados: "
+                "%d (mínimo recomendado: 5)"
+            ),
+            len(embedding_rows),
+        )
+        # Continuamos de todas formas, pero es una advertencia
+
     # Verificar que todos tienen el mismo número de factores
     n_factors = int(embedding_rows[0]["n_factors"])
     if n_factors != n_components:
@@ -107,6 +150,17 @@ def update_user_embedding(
     release_embeddings = []
     rating_weights = []
 
+    # release_ids y ratings vienen de la misma query, así que deben tener la misma longitud
+    if len(release_ids) != len(ratings):
+        LOGGER.error(
+            "Inconsistencia: release_ids tiene %d elementos pero ratings tiene %d",
+            len(release_ids),
+            len(ratings),
+        )
+        return False
+
+    # Construir diccionario de release_id -> rating
+    # No necesitamos strict=True porque ya verificamos la longitud arriba
     release_to_rating = {rid: rating for rid, rating in zip(release_ids, ratings, strict=False)}
 
     for row in embedding_rows:
@@ -132,8 +186,13 @@ def update_user_embedding(
     release_embeddings_array = np.array(release_embeddings, dtype=np.float32)
     rating_weights_array = np.array(rating_weights, dtype=np.float32)
 
-    # Normalizar pesos
-    rating_weights_array = rating_weights_array / rating_weights_array.sum()
+    # Normalizar pesos (evitar división por cero)
+    weights_sum = rating_weights_array.sum()
+    if weights_sum == 0:
+        LOGGER.warning("Suma de pesos es cero, usando pesos uniformes")
+        rating_weights_array = np.ones_like(rating_weights_array) / len(rating_weights_array)
+    else:
+        rating_weights_array = rating_weights_array / weights_sum
 
     # Calcular promedio ponderado
     user_embedding = np.dot(rating_weights_array, release_embeddings_array)

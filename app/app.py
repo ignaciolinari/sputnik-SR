@@ -227,8 +227,9 @@ def recommendations():
 
     release_ids = recommender.recommend(user_id)
 
-    for release_id in release_ids:
-        recommender.store_interaction(release_id, user_id, 0)
+    # Batch insert para marcar releases como vistos (más eficiente que loop)
+    if release_ids:
+        recommender.store_interactions_batch([(rid, user_id, 0.0) for rid in release_ids])
 
     releases = recommender.release_details(release_ids)
     recommendation_ids = {item["id_release"] for item in releases}
@@ -314,8 +315,9 @@ def recommendations_for_release(release_id: int):
         abort(404)
 
     release_ids = recommender.recommend_context(user_id, release_id)
-    for candidate_id in release_ids:
-        recommender.store_interaction(candidate_id, user_id, 0)
+    # Batch insert para marcar releases como vistos
+    if release_ids:
+        recommender.store_interactions_batch([(rid, user_id, 0.0) for rid in release_ids])
 
     releases = recommender.release_details(release_ids)
     rated_count = len(recommender.rated_release_ids(user_id))
@@ -407,23 +409,43 @@ def update_nmf_embedding():
             }
         ), 400
 
-    # Verificar que hay embeddings de releases disponibles
+    # Verificar que hay embeddings de releases disponibles antes de intentar actualizar
     import sqlite3
 
     from app.recommender import _connect
 
     try:
-        connection = _connect()
-        connection.row_factory = sqlite3.Row
+        # Usar context manager para asegurar cierre correcto
+        with _connect() as connection:
+            connection.row_factory = sqlite3.Row
 
-        success = nmf_update.update_user_embedding(
-            connection,
-            user_id,
-            min_rating=recommender.Config.positive_rating_threshold,
-            n_components=50,  # Debería detectarse automáticamente
-        )
+            # Verificar que hay releases con embeddings disponibles
+            release_count_row = connection.execute(
+                "SELECT COUNT(*) as count FROM release_embeddings"
+            ).fetchone()
+            release_count = (
+                int(release_count_row[0]) if release_count_row and release_count_row[0] else 0
+            )
 
-        connection.close()
+            if release_count == 0:
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": (
+                            "No hay embeddings de releases disponibles. "
+                            "Necesitás ejecutar el script de construcción de embeddings primero."
+                        ),
+                    }
+                ), 400
+
+            # n_components se detecta automáticamente desde los embeddings existentes
+            # El valor 50 es solo un fallback si no se puede detectar
+            success = nmf_update.update_user_embedding(
+                connection,
+                user_id,
+                min_rating=recommender.Config.positive_rating_threshold,
+                n_components=50,
+            )
 
         if success:
             # Limpiar cache de recomendaciones para forzar recálculo

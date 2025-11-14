@@ -208,18 +208,19 @@
     {% else %}
     <div class="p-6 bg-white border rounded text-slate-600">No encontramos discos nuevos para recomendar. Prob&aacute; limpiar tu historial.</div>
     {% endif %}
-    <div id="info-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4">
-        <div class="bg-white rounded-lg shadow-xl max-w-xl w-full p-6">
-            <div class="flex items-start justify-between mb-4">
+    <div id="info-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-4">
+        <div class="bg-white rounded-lg shadow-xl max-w-xl w-full max-h-[90vh] flex flex-col">
+            <div class="flex items-start justify-between p-6 pb-4 border-b border-slate-200 flex-shrink-0">
                 <div>
                     <h2 class="text-lg font-semibold text-slate-800">Información técnica</h2>
                     <p class="text-sm text-slate-500">Resumen rápido del estado actual del sistema.</p>
                 </div>
-                <button type="button" class="text-slate-400 hover:text-slate-600" data-info-close aria-label="Cerrar">
+                <button type="button" class="text-slate-400 hover:text-slate-600 flex-shrink-0 ml-4" data-info-close aria-label="Cerrar">
                     &#10005;
                 </button>
             </div>
-            <div class="space-y-6 text-sm text-slate-600">
+            <div class="overflow-y-auto flex-1 p-6">
+                <div class="space-y-6 text-sm text-slate-600">
                 <section>
                     <h3 class="text-base font-semibold text-slate-700 mb-1">Base de datos</h3>
                     <p class="mb-1">
@@ -276,8 +277,9 @@
                         {% endfor %}
                     </ul>
                 </section>
+                </div>
             </div>
-            <div class="mt-6 flex justify-end">
+            <div class="p-6 pt-4 border-t border-slate-200 flex justify-end flex-shrink-0">
                 <button type="button" class="px-4 py-2 rounded bg-teal-500 text-white font-semibold hover:bg-teal-600" data-info-close>Entendido</button>
             </div>
         </div>
