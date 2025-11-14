@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections import Counter
 
 
 try:
@@ -142,14 +143,27 @@ def update_user_embedding(
         # Continuamos de todas formas, pero es una advertencia
 
     # Verificar que todos tienen la misma dimensión
-    dim = int(embedding_rows[0]["embedding_dim"])
-    if dim != embedding_dim:
+    dims_found = set()
+    for row in embedding_rows:
+        dims_found.add(int(row["embedding_dim"]))
+
+    if len(dims_found) > 1:
         LOGGER.warning(
-            "Dimensión de embedding no coincide: esperado %d, encontrado %d",
-            embedding_dim,
-            dim,
+            "Se encontraron múltiples dimensiones de embeddings: %s. Usando la más común.",
+            dims_found,
         )
-        embedding_dim = dim
+        # Usar la dimensión más común
+        dim_counter = Counter(int(row["embedding_dim"]) for row in embedding_rows)
+        embedding_dim = dim_counter.most_common(1)[0][0]
+    elif len(dims_found) == 1:
+        detected_dim = dims_found.pop()
+        if detected_dim != embedding_dim:
+            LOGGER.info(
+                "Ajustando embedding_dim de %d a %d basado en embeddings existentes",
+                embedding_dim,
+                detected_dim,
+            )
+            embedding_dim = detected_dim
 
     # Construir matriz de embeddings de releases y vector de ratings
     release_embeddings = []
@@ -170,9 +184,26 @@ def update_user_embedding(
     for row in embedding_rows:
         release_id = int(row["id_release"])
         embedding_json = row["embedding_json"]
-        embedding = json.loads(embedding_json)
 
-        if len(embedding) != embedding_dim:
+        try:
+            embedding = json.loads(embedding_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            LOGGER.warning("Error parseando embedding JSON para release %d: %s", release_id, e)
+            continue
+
+        # Validar que el embedding tiene la dimensión correcta
+        if not isinstance(embedding, list):
+            LOGGER.warning("Embedding para release %d no es una lista", release_id)
+            continue
+
+        row_dim = int(row["embedding_dim"])
+        if len(embedding) != embedding_dim or row_dim != embedding_dim:
+            LOGGER.debug(
+                "Saltando release %d: dimensión del embedding (%d) no coincide con esperado (%d)",
+                release_id,
+                len(embedding),
+                embedding_dim,
+            )
             continue
 
         release_embeddings.append(embedding)

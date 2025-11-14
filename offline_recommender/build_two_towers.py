@@ -727,7 +727,16 @@ def save_embeddings(
             [user_roles_batch, user_numeric_batch], verbose=0, batch_size=batch_size
         )
 
-        for user_id, embedding in zip(batch_user_ids, embeddings, strict=False):
+        # Validate that we got the expected number of embeddings
+        if len(embeddings) != len(batch_user_ids):
+            LOGGER.error(
+                "Mismatch: generados %d embeddings pero esperados %d usuarios",
+                len(embeddings),
+                len(batch_user_ids),
+            )
+            continue
+
+        for user_id, embedding in zip(batch_user_ids, embeddings, strict=True):
             user_embeddings_data.append(
                 (
                     user_id,
@@ -793,7 +802,16 @@ def save_embeddings(
             batch_size=batch_size,
         )
 
-        for release_id, embedding in zip(batch_release_ids, embeddings, strict=False):
+        # Validate that we got the expected number of embeddings
+        if len(embeddings) != len(batch_release_ids):
+            LOGGER.error(
+                "Mismatch: generados %d embeddings pero esperados %d releases",
+                len(embeddings),
+                len(batch_release_ids),
+            )
+            continue
+
+        for release_id, embedding in zip(batch_release_ids, embeddings, strict=True):
             release_embeddings_data.append(
                 (
                     release_id,

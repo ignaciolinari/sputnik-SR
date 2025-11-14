@@ -1409,10 +1409,13 @@ def recommend_two_towers(user_id: str, limit: int = 9) -> List[int]:
         scores: Dict[int, float] = {}
         user_vec = np.array(user_embedding, dtype=np.float32)
 
+        # Track if we loaded all releases (for filtering seen_ids in Python)
+        loaded_all_releases = len(seen_ids) > SQLITE_MAX_PARAMS
+
         for row in release_rows:
             release_id = int(row["id_release"])
             # Filter seen releases if we loaded all (for large seen sets)
-            if len(seen_ids) > SQLITE_MAX_PARAMS:
+            if loaded_all_releases:
                 if release_id in seen_ids:
                     continue
 
@@ -1421,7 +1424,15 @@ def recommend_two_towers(user_id: str, limit: int = 9) -> List[int]:
             except (json.JSONDecodeError, TypeError):
                 continue
 
+            # Validate embedding dimension matches user embedding
+            if not isinstance(release_embedding, list) or len(release_embedding) != embedding_dim:
+                continue
+
             release_vec = np.array(release_embedding, dtype=np.float32)
+
+            # Validate shapes match before dot product
+            if release_vec.shape != user_vec.shape:
+                continue
 
             # Since embeddings are L2-normalized, dot product = cosine similarity
             similarity = np.dot(user_vec, release_vec)
