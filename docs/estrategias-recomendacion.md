@@ -7,11 +7,12 @@ Este documento describe todas las estrategias de recomendación implementadas en
 1. [Motor Híbrido](#motor-híbrido)
 2. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
 3. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
-4. [Perfiles de Contenido](#perfiles-de-contenido)
-5. [Popularidad](#popularidad)
-6. [Exploración Aleatoria](#exploración-aleatoria)
-7. [Recomendaciones Contextuales](#recomendaciones-contextuales)
-8. [Métricas de Evaluación](#métricas-de-evaluación)
+4. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+5. [Perfiles de Contenido](#perfiles-de-contenido)
+6. [Popularidad](#popularidad)
+7. [Exploración Aleatoria](#exploración-aleatoria)
+8. [Recomendaciones Contextuales](#recomendaciones-contextuales)
+9. [Métricas de Evaluación](#métricas-de-evaluación)
 
 ---
 
@@ -32,14 +33,21 @@ El motor híbrido es la estrategia principal que combina todas las demás estrat
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
-3. **Con 9-19 calificaciones positivas:**
+3. **Con 9 calificaciones positivas:**
    - Prioriza perfiles de contenido (`recommend_content_based`)
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
-4. **Con ≥20 calificaciones positivas:**
+4. **Con 10-19 calificaciones positivas:**
+   - Prioriza Two Towers (`recommend_two_towers`) si embeddings disponibles
+   - Si Two Towers no disponible, usa perfiles de contenido como fallback
+   - Si faltan candidatos, completa con popularidad
+   - Si aún faltan, agrega aleatorios
+
+5. **Con ≥20 calificaciones positivas:**
    - Prioriza factorización matricial (`recommend_nmf`) si embeddings disponibles
-   - Si NMF no disponible, usa perfiles de contenido como fallback
+   - Si NMF no disponible, intenta Two Towers como fallback
+   - Si Two Towers no disponible, usa perfiles de contenido como fallback
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
@@ -300,11 +308,171 @@ python -m offline_recommender.build_nmf_embeddings \
 
 ---
 
+## Two Towers (Deep Learning)
+
+**Función:** `recommend_two_towers(user_id, limit=9)`
+
+Sistema basado en **aprendizaje profundo** que utiliza una arquitectura Two Towers para aprender embeddings separados de usuarios e items basándose en sus características y preferencias. Se activa automáticamente para usuarios con 10-19 calificaciones positivas cuando los embeddings están disponibles, o como fallback para usuarios con ≥20 calificaciones si NMF no está disponible.
+
+### Arquitectura
+
+El modelo consiste en dos redes neuronales separadas:
+
+1. **Torre de Usuario (User Tower)**
+   - Codifica características del usuario (role, objectivity_score, soundoffs, ratings_count, días desde registro/actividad)
+   - Output: Embedding de usuario (vector de dimensión configurable, default: 64)
+
+2. **Torre de Items (Item Tower)**
+   - Codifica características del release (artist_id, release_type, géneros, año, avg_rating, ratings_count)
+   - Output: Embedding de release (vector de misma dimensión)
+
+3. **Scoring**
+   - Producto escalar entre embeddings normalizados (equivalente a similitud coseno)
+   - Los embeddings se normalizan con L2 para eficiencia
+
+### Construcción de Embeddings (Offline)
+
+**Script:** `offline_recommender/build_two_towers.py`
+
+#### Proceso:
+
+1. **Filtrado de datos:**
+   - Filtra interacciones con `rating >= 3.0` (configurable)
+   - Incluye solo usuarios con ≥5 calificaciones positivas (configurable)
+   - Incluye solo releases con ≥3 calificaciones positivas (configurable)
+   - Opcionalmente limita con `--sample-size` para pruebas rápidas
+
+2. **Extracción de features:**
+   - **Usuarios**: role, objectivity_score, soundoffs, ratings_count, días desde registro/actividad
+   - **Releases**: artist_id, release_type, géneros (multi-hot), release_year, avg_rating, ratings_count
+   - Normalización y transformaciones (log, escalado, etc.)
+
+3. **Entrenamiento del modelo:**
+   - Arquitectura con Keras/TensorFlow
+   - Embeddings categóricos (role, artist, type, genres)
+   - Capas densas para features numéricas
+   - Dropout para regularización
+   - Loss: MSE (Mean Squared Error)
+   - Optimizador: Adam con learning rate configurable
+   - Callbacks: Early stopping, ReduceLROnPlateau
+
+4. **Almacenamiento:**
+   - Guarda embeddings de usuarios en tabla `user_embeddings_dl`
+   - Guarda embeddings de releases en tabla `release_embeddings_dl`
+   - Cada embedding incluye dimensión y versión del modelo
+
+### Recomendación en Tiempo Real
+
+#### Algoritmo `recommend_two_towers()`:
+
+1. **Carga embedding del usuario:**
+   - Busca en `user_embeddings_dl` el embedding del usuario
+   - Si no existe, retorna lista vacía (fallback a content-based)
+
+2. **Calcula similitud:**
+   - Para cada release con embedding disponible:
+     ```python
+     # Embeddings ya están L2-normalizados, producto escalar = coseno
+     similarity = dot(user_embedding, release_embedding)
+     ```
+
+3. **Filtra y ordena:**
+   - Excluye releases ya vistos o calificados por el usuario
+   - Ordena por similitud descendente
+   - Retorna top-k recomendaciones
+
+### Configuración Actual
+
+- **Umbral de activación:** `min_two_towers_signals = 10` (usuarios con ≥10 calificaciones positivas)
+- **Dimensión de embeddings:** `embedding_dim = 64` (configurable)
+- **Filtros de datos:** `min_user_ratings = 5`, `min_release_ratings = 3` (configurable)
+- **Épocas:** `epochs = 10` (configurable, con early stopping)
+- **Batch size:** `batch_size = 1024` (configurable)
+
+### Ejemplo Práctico
+
+**Usuario con 15 calificaciones positivas:**
+
+1. Sistema híbrido detecta que tiene ≥10 calificaciones
+2. Intenta usar `recommend_two_towers()`
+3. Carga embedding del usuario (vector de 64 dimensiones)
+4. Calcula similitud con releases con embeddings disponibles
+5. Retorna top 9 recomendaciones más similares
+
+**Si embeddings no disponibles:**
+- Fallback automático a `recommend_content_based()`
+- Sistema sigue funcionando normalmente
+
+### Ventajas
+
+- ✅ **Mejor uso de features**: Aprovecha características de usuario e items que NMF no usa
+- ✅ **Cold start mejorado**: Puede hacer recomendaciones usando features estáticas sin historial extenso
+- ✅ **Patrones no lineales**: Las redes neuronales pueden capturar relaciones complejas
+- ✅ **Flexibilidad**: Fácil agregar nuevas features sin cambiar la arquitectura
+- ✅ **Escalable**: Inferencia rápida con embeddings precomputados
+- ✅ **Complementario**: Puede coexistir con NMF y usarse según el caso
+
+### Limitaciones
+
+- ⚠️ **Requiere embeddings precomputados**: Deben generarse offline periódicamente
+- ⚠️ **Tiempo de entrenamiento**: Más lento que NMF (minutos vs segundos)
+- ⚠️ **Hiperparámetros**: Requiere tuning de arquitectura, learning rate, etc.
+- ⚠️ **Dependencias**: Requiere TensorFlow/Keras
+- ⚠️ **Memoria**: Modelo más pesado que NMF (aunque embeddings son similares)
+- ⚠️ **Menos interpretable**: Los embeddings no tienen significado directo
+
+### Entrenamiento del Modelo
+
+Los embeddings deben generarse offline usando el script de construcción:
+
+```bash
+# Entrenamiento completo (recomendado)
+python -m offline_recommender.build_two_towers \
+    --database data/sputnik.db \
+    --embedding-dim 64 \
+    --epochs 10 \
+    --batch-size 1024 \
+    --min-user-ratings 5 \
+    --min-release-ratings 3 \
+    --verbose
+
+# Prueba rápida con subconjunto
+python -m offline_recommender.build_two_towers \
+    --database data/sputnik.db \
+    --sample-size 50000 \
+    --epochs 5 \
+    --verbose
+```
+
+**Tiempo estimado**:
+- Prueba rápida (50k interacciones): ~30 segundos
+- Entrenamiento completo (8M interacciones): 3-6 horas en CPU
+
+### Actualización de Embeddings
+
+Los embeddings deben regenerarse periódicamente cuando haya nuevas interacciones en el sistema. A diferencia de NMF, actualmente no hay actualización bajo demanda para usuarios individuales (requiere reentrenar el modelo completo).
+
+**Recomendación**: Reentrenar semanalmente o cuando haya cambios significativos en los datos.
+
+### Comparación con NMF
+
+| Aspecto | NMF | Two Towers |
+|---------|-----|------------|
+| **Umbral mínimo** | 20 ratings | 10 ratings |
+| **Features** | Solo ratings | Múltiples features |
+| **Cold start** | Malo | Mejor (usa features) |
+| **Entrenamiento** | Rápido (~1-2 min) | Más lento (~10-30 min) |
+| **Inferencia** | Muy rápida | Rápida |
+| **Patrones** | Lineales | No lineales |
+| **Interpretabilidad** | Baja | Baja |
+
+---
+
 ## Perfiles de Contenido
 
 **Función:** `recommend_content_based(user_id, limit=9)`
 
-Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene entre 9-19 calificaciones positivas, o como fallback si NMF no está disponible para usuarios con ≥20 calificaciones.
+Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene 9 calificaciones positivas, o como fallback si Two Towers o NMF no están disponibles para usuarios con más calificaciones.
 
 ### Construcción del Perfil (`_user_profile`)
 
@@ -616,6 +784,7 @@ python -m offline_recommender.evaluate_recommender \
 
 - **`positive_rating_threshold`**: `3.0` - Rating mínimo para considerar positiva una interacción
 - **`max_pairs_signals`**: `8` - Umbral para cambiar de co-ocurrencia a contenido
+- **`min_two_towers_signals`**: `10` - Umbral para activar Two Towers (usuarios con ≥10 calificaciones positivas)
 - **`min_nmf_signals`**: `20` - Umbral para activar NMF (usuarios con ≥20 calificaciones positivas)
 - **`genre_weight`**: `1.0` - Peso de géneros en scoring de contenido
 - **`artist_weight`**: `0.8` - Peso de artistas en scoring de contenido
@@ -635,7 +804,8 @@ python -m offline_recommender.evaluate_recommender \
 | **Motor Híbrido** | Siempre (principal) | Alta | Alta |
 | **Co-ocurrencia** | ≤8 calificaciones | Media-Alta | Media |
 | **NMF** | ≥20 calificaciones | Muy Alta | Alta |
-| **Contenido** | 9-19 calificaciones | Alta | Media |
+| **Two Towers** | 10-19 calificaciones | Muy Alta | Alta |
+| **Contenido** | 9 calificaciones, fallback | Alta | Media |
 | **Popularidad** | Fallback | Baja | Baja |
 | **Aleatorio** | Último fallback | Ninguna | Baja |
 | **Contextual** | Página de disco | Media | Media |
@@ -703,6 +873,7 @@ User-based CF sería beneficioso si:
 - Actualización de embeddings bajo demanda: `app/nmf_update.py`
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
 - Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
+- Construcción de embeddings Two Towers: `offline_recommender/build_two_towers.py`
 - Evaluación: `offline_recommender/evaluate_recommender.py`
 - Métricas: `app/metrics.py`
 - Análisis NMF: `docs/analisis-svd-nmf.md`

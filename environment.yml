@@ -16,3 +16,6 @@ dependencies:
   - tqdm
   - pre-commit
   - pytest
+  - pip
+  - pip:
+    - tensorflow>=2.15.0

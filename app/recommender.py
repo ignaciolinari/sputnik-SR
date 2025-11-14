@@ -30,6 +30,7 @@ class Config:
     positive_rating_threshold: float = 3.0
     max_pairs_signals: int = 8
     min_nmf_signals: int = 20  # Minimum positive ratings to use NMF
+    min_two_towers_signals: int = 10  # Minimum positive ratings to use Two Towers
     genre_weight: float = 1.0
     artist_weight: float = 0.8
     popularity_prior: float = 0.3
@@ -488,6 +489,8 @@ def reset_user_history(user_id: str) -> None:
     _execute("DELETE FROM interactions WHERE id_user = ?;", [user_id])
     # Eliminar embedding NMF del usuario si existe (ya no tiene sentido sin interacciones)
     _execute("DELETE FROM user_embeddings WHERE id_user = ?;", [user_id])
+    # Eliminar embedding Two Towers (DL) del usuario si existe
+    _execute("DELETE FROM user_embeddings_dl WHERE id_user = ?;", [user_id])
     # Limpiar explicaciones y estrategias almacenadas en memoria
     _LAST_EXPLANATIONS.pop(user_id, None)
     _LAST_STRATEGY.pop(user_id, None)
@@ -1111,7 +1114,29 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
             explanations.append("Basado en patrones latentes de tus preferencias")
             _cache_last_strategy(user_id, "nmf")
         else:
-            # Fallback to content-based if NMF not available
+            # Try Two Towers as fallback if NMF not available
+            two_towers_candidates = recommend_two_towers(user_id, limit=limit)
+            if two_towers_candidates:
+                candidates = two_towers_candidates
+                explanations.append("Basado en aprendizaje profundo de tus preferencias")
+                _cache_last_strategy(user_id, "two_towers")
+            else:
+                # Fallback to content-based if neither NMF nor Two Towers available
+                candidates = recommend_content_based(
+                    user_id, limit=limit, interactions=interactions
+                )
+                if candidates:
+                    explanations.append("Basado en tus géneros y artistas con mejor puntaje")
+                _cache_last_strategy(user_id, "content")
+    elif len(positive_interactions) >= Config.min_two_towers_signals:
+        # Try Two Towers for users with moderate history
+        two_towers_candidates = recommend_two_towers(user_id, limit=limit)
+        if two_towers_candidates:
+            candidates = two_towers_candidates
+            explanations.append("Basado en aprendizaje profundo de tus preferencias")
+            _cache_last_strategy(user_id, "two_towers")
+        else:
+            # Fallback to content-based if Two Towers not available
             candidates = recommend_content_based(user_id, limit=limit, interactions=interactions)
             if candidates:
                 explanations.append("Basado en tus géneros y artistas con mejor puntaje")
@@ -1317,6 +1342,132 @@ def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
     except (json.JSONDecodeError, ValueError, KeyError, ImportError):
         # Silently fail if embeddings not available or numpy not installed
         return []
+
+
+def recommend_two_towers(user_id: str, limit: int = 9) -> List[int]:
+    """Recomendar usando embeddings Two Towers (Deep Learning) precomputados.
+
+    Esta función requiere que los embeddings hayan sido precomputados usando
+    offline_recommender/build_two_towers.py.
+
+    Returns empty list if embeddings are not available or user has insufficient history.
+    """
+    if np is None:
+        return []
+
+    try:
+        rows = _select(
+            """
+            SELECT embedding_json, embedding_dim
+            FROM user_embeddings_dl
+            WHERE id_user = ?;
+            """,
+            [user_id],
+        )
+
+        if not rows:
+            return []
+
+        user_embedding_json = rows[0]["embedding_json"]
+        embedding_dim = int(rows[0]["embedding_dim"])
+        user_embedding = json.loads(user_embedding_json)
+
+        if len(user_embedding) != embedding_dim:
+            return []
+
+        # Get release embeddings (excluding seen releases for efficiency)
+        seen_ids = _user_seen_release_ids(user_id)
+
+        # SQLite has a limit on number of parameters (typically 999)
+        # For large seen sets, load all and filter in Python
+        SQLITE_MAX_PARAMS = 999
+        if len(seen_ids) > 0 and len(seen_ids) <= SQLITE_MAX_PARAMS:
+            # Use SQL to exclude seen releases when feasible
+            placeholders = ",".join("?" for _ in seen_ids)
+            release_rows = _select(
+                f"""
+                SELECT id_release, embedding_json
+                FROM release_embeddings_dl
+                WHERE id_release NOT IN ({placeholders});
+                """,
+                list(seen_ids),
+            )
+        else:
+            # Load all and filter in Python for very large or empty seen sets
+            release_rows = _select(
+                """
+                SELECT id_release, embedding_json
+                FROM release_embeddings_dl;
+                """,
+            )
+
+        if not release_rows:
+            return []
+
+        # Calculate cosine similarities (embeddings are already L2-normalized)
+        # So dot product = cosine similarity
+        scores: Dict[int, float] = {}
+        user_vec = np.array(user_embedding, dtype=np.float32)
+
+        for row in release_rows:
+            release_id = int(row["id_release"])
+            # Filter seen releases if we loaded all (for large seen sets)
+            if len(seen_ids) > SQLITE_MAX_PARAMS:
+                if release_id in seen_ids:
+                    continue
+
+            try:
+                release_embedding = json.loads(row["embedding_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            release_vec = np.array(release_embedding, dtype=np.float32)
+
+            # Since embeddings are L2-normalized, dot product = cosine similarity
+            similarity = np.dot(user_vec, release_vec)
+            scores[release_id] = float(similarity)
+
+        # Sort by similarity and return top-k
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        return [release_id for release_id, _ in ranked[:limit]]
+
+    except (json.JSONDecodeError, ValueError, KeyError, ImportError):
+        # Silently fail if embeddings not available or numpy not installed
+        return []
+
+
+def user_has_two_towers_embedding(user_id: str) -> bool:
+    """Verificar si el usuario tiene un embedding Two Towers disponible y válido."""
+    rows = _select(
+        """
+        SELECT embedding_json, embedding_dim
+        FROM user_embeddings_dl
+        WHERE id_user = ?;
+        """,
+        [user_id],
+    )
+
+    if not rows:
+        return False
+
+    # Verificar que el embedding es válido (tiene el formato correcto)
+    try:
+        embedding_json = rows[0]["embedding_json"]
+        embedding_dim = int(rows[0]["embedding_dim"])
+        embedding = json.loads(embedding_json)
+
+        # Verificar que el embedding tiene la longitud correcta
+        if not isinstance(embedding, list) or len(embedding) != embedding_dim:
+            return False
+
+        # Verificar que hay releases con embeddings disponibles
+        release_count_rows = _select("SELECT COUNT(*) as count FROM release_embeddings_dl")
+        if release_count_rows and release_count_rows[0]["count"] > 0:
+            return True
+
+        return False
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        return False
 
 
 def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int]:
@@ -1794,6 +1945,15 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "description": (
             "Usa patrones latentes aprendidos de tus preferencias cuando tenés "
             "20 o más calificaciones positivas."
+        ),
+    },
+    {
+        "id": "two_towers",
+        "name": "Two Towers (Deep Learning)",
+        "description": (
+            "Modelo de aprendizaje profundo que aprende embeddings de usuarios e items "
+            "usando características y preferencias. "
+            "Se activa con 10 o más calificaciones positivas."
         ),
     },
     {

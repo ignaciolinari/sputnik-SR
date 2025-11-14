@@ -17,6 +17,7 @@ from flask import url_for
 
 from . import nmf_update
 from . import recommender
+from . import two_towers_update
 
 
 app = Flask(__name__)
@@ -476,6 +477,106 @@ def update_nmf_embedding():
         import logging
 
         logging.exception("Error actualizando embedding NMF")
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Error al actualizar embedding: {str(e)}",
+            }
+        ), 500
+
+
+@app.post("/actualizar-two-towers")
+def update_two_towers_embedding():
+    """Actualizar embedding Two Towers del usuario actual."""
+    user_id = request.cookies.get("id_usuario")
+    if not user_id:
+        return redirect("/")
+
+    # Verificar que el usuario tiene suficientes calificaciones
+    positive_interactions = [
+        interaction
+        for interaction in recommender._user_interactions(user_id)
+        if interaction.rating >= recommender.Config.positive_rating_threshold
+    ]
+
+    if len(positive_interactions) < recommender.Config.min_two_towers_signals:
+        return jsonify(
+            {
+                "success": False,
+                "message": (
+                    f"Necesitás al menos {recommender.Config.min_two_towers_signals} "
+                    "calificaciones positivas para usar Two Towers."
+                ),
+            }
+        ), 400
+
+    # Verificar que hay embeddings de releases disponibles antes de intentar actualizar
+    import sqlite3
+
+    from app.recommender import _connect
+
+    try:
+        # Usar context manager para asegurar cierre correcto
+        with _connect() as connection:
+            connection.row_factory = sqlite3.Row
+
+            # Verificar que hay releases con embeddings disponibles
+            release_count_row = connection.execute(
+                "SELECT COUNT(*) as count FROM release_embeddings_dl"
+            ).fetchone()
+            release_count = (
+                int(release_count_row[0]) if release_count_row and release_count_row[0] else 0
+            )
+
+            if release_count == 0:
+                return jsonify(
+                    {
+                        "success": False,
+                        "message": (
+                            "No hay embeddings de releases disponibles. "
+                            "Necesitás ejecutar el script de construcción de embeddings primero."
+                        ),
+                    }
+                ), 400
+
+            # embedding_dim se detecta automáticamente desde los embeddings existentes
+            # El valor 64 es solo un fallback si no se puede detectar
+            success = two_towers_update.update_user_embedding(
+                connection,
+                user_id,
+                min_rating=recommender.Config.positive_rating_threshold,
+                embedding_dim=64,
+            )
+
+        if success:
+            # Limpiar cache de recomendaciones para forzar recálculo
+            recommender._LAST_EXPLANATIONS.pop(user_id, None)
+            recommender._LAST_STRATEGY.pop(user_id, None)
+
+            return jsonify(
+                {
+                    "success": True,
+                    "message": (
+                        "Embedding Two Towers actualizado exitosamente. "
+                        "Tus recomendaciones ahora usan aprendizaje profundo."
+                    ),
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": (
+                        "No se pudo actualizar el embedding. "
+                        "Verificá que hay suficientes releases con embeddings disponibles."
+                    ),
+                }
+            ), 500
+
+    except Exception as e:
+        import logging
+
+        logging.exception("Error actualizando embedding Two Towers")
         return jsonify(
             {
                 "success": False,
