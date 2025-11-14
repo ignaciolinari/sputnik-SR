@@ -8,12 +8,14 @@ import os
 from flask import Flask
 from flask import abort
 from flask import g
+from flask import jsonify
 from flask import make_response
 from flask import redirect
 from flask import render_template
 from flask import request
 from flask import url_for
 
+from . import nmf_update
 from . import recommender
 
 
@@ -21,7 +23,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "08/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "14/11/2025")
 
 
 RATING_CHOICES = [
@@ -243,6 +245,16 @@ def recommendations():
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
     explanations = recommender.last_explanations(user_id)
+
+    # Verificar si el usuario puede usar NMF (siempre calcular para mostrar el botón)
+    positive_interactions = [
+        interaction
+        for interaction in recommender._user_interactions(user_id)
+        if interaction.rating >= recommender.Config.positive_rating_threshold
+    ]
+    can_use_nmf = len(positive_interactions) >= recommender.Config.min_nmf_signals
+    has_nmf_embedding = recommender.user_has_nmf_embedding(user_id) if can_use_nmf else False
+
     genre_options = list(recommender.list_genres())
     year_options = list(recommender.list_release_years())
     type_options = list(recommender.list_release_types())
@@ -286,6 +298,9 @@ def recommendations():
         last_update_display=LAST_APP_UPDATE,
         database_info=recommender.current_database_info(),
         active_recommenders=recommender.active_recommendation_systems(),
+        can_use_nmf=can_use_nmf,
+        has_nmf_embedding=has_nmf_embedding,
+        positive_ratings_count=len(positive_interactions),
     )
 
 
@@ -365,6 +380,86 @@ def reset_history():
         return redirect("/")
     recommender.reset_user_history(user_id)
     return redirect("/recomendaciones")
+
+
+@app.post("/actualizar-nmf")
+def update_nmf_embedding():
+    """Actualizar embedding NMF del usuario actual."""
+    user_id = request.cookies.get("id_usuario")
+    if not user_id:
+        return redirect("/")
+
+    # Verificar que el usuario tiene suficientes calificaciones
+    positive_interactions = [
+        interaction
+        for interaction in recommender._user_interactions(user_id)
+        if interaction.rating >= recommender.Config.positive_rating_threshold
+    ]
+
+    if len(positive_interactions) < recommender.Config.min_nmf_signals:
+        return jsonify(
+            {
+                "success": False,
+                "message": (
+                    f"Necesitás al menos {recommender.Config.min_nmf_signals} "
+                    "calificaciones positivas para usar NMF."
+                ),
+            }
+        ), 400
+
+    # Verificar que hay embeddings de releases disponibles
+    import sqlite3
+
+    from app.recommender import _connect
+
+    try:
+        connection = _connect()
+        connection.row_factory = sqlite3.Row
+
+        success = nmf_update.update_user_embedding(
+            connection,
+            user_id,
+            min_rating=recommender.Config.positive_rating_threshold,
+            n_components=50,  # Debería detectarse automáticamente
+        )
+
+        connection.close()
+
+        if success:
+            # Limpiar cache de recomendaciones para forzar recálculo
+            recommender._LAST_EXPLANATIONS.pop(user_id, None)
+            recommender._LAST_STRATEGY.pop(user_id, None)
+
+            return jsonify(
+                {
+                    "success": True,
+                    "message": (
+                        "Embedding NMF actualizado exitosamente. "
+                        "Tus recomendaciones ahora usan patrones latentes."
+                    ),
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": (
+                        "No se pudo actualizar el embedding. "
+                        "Verificá que hay suficientes releases con embeddings disponibles."
+                    ),
+                }
+            ), 500
+
+    except Exception as e:
+        import logging
+
+        logging.exception("Error actualizando embedding NMF")
+        return jsonify(
+            {
+                "success": False,
+                "message": f"Error al actualizar embedding: {str(e)}",
+            }
+        ), 500
 
 
 @app.get("/usuarios/<user_id>")

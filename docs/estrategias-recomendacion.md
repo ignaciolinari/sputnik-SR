@@ -251,12 +251,31 @@ Sistema basado en **Non-negative Matrix Factorization (NMF)** que aprende patron
 - ⚠️ **Depende de calidad de datos**: Requiere suficientes interacciones positivas
 - ⚠️ **Menos interpretable**: Los factores latentes no tienen significado directo
 
-### Actualización Periódica
+### Actualización de Embeddings
 
-Los embeddings deben reconstruirse cuando haya nuevas interacciones:
+Los embeddings pueden actualizarse de dos formas:
+
+#### 1. Actualización Bajo Demanda (Recomendado)
+
+Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón "Generar NMF" o "Actualizar NMF" junto a su nombre de usuario.
+
+**Ventajas:**
+- ✅ Actualización inmediata cuando el usuario califica nuevos discos
+- ✅ Solo recalcula el embedding del usuario (muy rápido, <1 segundo)
+- ✅ No requiere acceso al servidor ni scripts offline
+- ✅ Disponible directamente desde la interfaz web
+
+**Cómo funciona:**
+- El sistema calcula un promedio ponderado de los embeddings de releases que el usuario calificó positivamente
+- Usa los embeddings de releases precomputados (que deben existir)
+- Guarda el nuevo embedding del usuario en la base de datos
+
+#### 2. Actualización Periódica Offline (Para Releases)
+
+Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema:
 
 ```bash
-# Reconstruir embeddings (típicamente semanal)
+# Reconstruir embeddings de releases (típicamente semanal)
 python -m offline_recommender.build_nmf_embeddings \
     --n-components 50 \
     --min-user-ratings 10 \
@@ -265,6 +284,8 @@ python -m offline_recommender.build_nmf_embeddings \
 ```
 
 **Tiempo estimado**: 1-2 minutos para datasets medianos/grandes
+
+**Nota**: Los usuarios pueden actualizar sus embeddings individuales en cualquier momento desde la interfaz, pero los embeddings de releases deben regenerarse offline periódicamente para incluir nuevos releases y actualizar los patrones latentes globales.
 
 ### Comparación con Otras Estrategias
 
@@ -679,6 +700,7 @@ User-based CF sería beneficioso si:
 ## Referencias
 
 - Implementación: `app/recommender.py`
+- Actualización de embeddings bajo demanda: `app/nmf_update.py`
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
 - Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
 - Evaluación: `offline_recommender/evaluate_recommender.py`

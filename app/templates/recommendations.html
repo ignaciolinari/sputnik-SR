@@ -11,6 +11,24 @@
         <h1 class="text-2xl font-bold text-slate-800">
             Recomendaciones de discos para
             <a href="{{ url_for('user_collection_page', user_id=user_id) }}" class="underline decoration-teal-500 decoration-2 underline-offset-4 hover:text-teal-600">{{ user_id }}</a>
+            <button
+                id="update-nmf-btn"
+                type="button"
+                class="ml-3 bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-teal-500"
+                {% if can_use_nmf %}
+                    {% if has_nmf_embedding %}title="Actualizar recomendaciones basadas en patrones latentes"{% else %}title="Generar recomendaciones basadas en patrones latentes"{% endif %}
+                {% else %}
+                    title="Debes puntuar positivamente al menos 20 discos para desbloquear NMF"
+                    aria-label="Debes puntuar positivamente al menos 20 discos para desbloquear NMF"
+                    disabled
+                {% endif %}
+            >
+                {% if can_use_nmf %}
+                    {% if has_nmf_embedding %}🔄 Actualizar NMF{% else %}✨ Generar NMF{% endif %}
+                {% else %}
+                    🔒 Generar NMF
+                {% endif %}
+            </button>
         </h1>
         <div class="text-sm text-slate-600">
             {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
@@ -360,6 +378,54 @@
                     hideResetModal();
                 }
             });
+
+            // Manejar actualización de embedding NMF
+            const updateNmfBtn = document.getElementById("update-nmf-btn");
+            if (updateNmfBtn) {
+                updateNmfBtn.addEventListener("click", async function(event) {
+                    // Prevenir acción si el botón está deshabilitado
+                    if (this.disabled) {
+                        event.preventDefault();
+                        return;
+                    }
+
+                    const btn = this;
+                    const originalText = btn.textContent;
+                    btn.disabled = true;
+                    btn.textContent = "⏳ Procesando...";
+
+                    try {
+                        const response = await fetch("/actualizar-nmf", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                            },
+                        });
+
+                        const data = await response.json();
+
+                        if (data.success) {
+                            btn.textContent = "✅ " + (data.message || "Actualizado");
+                            btn.classList.remove("bg-teal-500", "hover:bg-teal-600");
+                            btn.classList.add("bg-green-500", "hover:bg-green-600");
+
+                            // Recargar página después de 1 segundo para mostrar nuevas recomendaciones
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 1000);
+                        } else {
+                            alert(data.message || "Error al actualizar embedding");
+                            btn.textContent = originalText;
+                            btn.disabled = false;
+                        }
+                    } catch (error) {
+                        console.error("Error:", error);
+                        alert("Error al comunicarse con el servidor");
+                        btn.textContent = originalText;
+                        btn.disabled = false;
+                    }
+                });
+            }
         });
     </script>
 </body>

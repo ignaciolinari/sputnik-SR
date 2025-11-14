@@ -1140,6 +1140,19 @@ def _diversify_by_artist(release_ids: Sequence[int], *, limit: int) -> List[int]
     return diversified
 
 
+def user_has_nmf_embedding(user_id: str) -> bool:
+    """Verificar si el usuario tiene un embedding NMF disponible."""
+    rows = _select(
+        """
+        SELECT COUNT(*) as count
+        FROM user_embeddings
+        WHERE id_user = ?;
+        """,
+        [user_id],
+    )
+    return len(rows) > 0 and rows[0]["count"] > 0
+
+
 def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
     """Recomendar usando embeddings NMF precomputados.
 
