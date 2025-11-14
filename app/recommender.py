@@ -22,7 +22,7 @@ from typing import Sequence
 
 class Config:
     positive_rating_threshold: float = 3.0
-    max_pairs_signals: int = 5
+    max_pairs_signals: int = 8
     genre_weight: float = 1.0
     artist_weight: float = 0.8
     popularity_prior: float = 0.3
@@ -445,6 +445,9 @@ def reset_user_history(user_id: str) -> None:
     for key in context_keys_to_remove:
         _LAST_CONTEXT_EXPLANATIONS.pop(key, None)
         _LAST_CONTEXT_STRATEGY.pop(key, None)
+    # Invalidar cachés relacionados con releases (géneros y artistas pueden cambiar)
+    release_genres.cache_clear()
+    release_artist_id.cache_clear()
 
 
 def user_collection(user_id: str) -> List[dict]:
@@ -604,6 +607,19 @@ def seen_release_ids(user_id: str) -> List[int]:
     return [int(row["id_release"]) for row in rows]
 
 
+def _user_seen_release_ids(user_id: str) -> set[int]:
+    """Devolver un set con todos los ids de lanzamientos con los que el usuario interactuó."""
+    rows = _select(
+        """
+        SELECT id_release
+        FROM interactions
+        WHERE id_user = ? AND rating >= 0;
+        """,
+        [user_id],
+    )
+    return {int(row["id_release"]) for row in rows}
+
+
 def _popular_unseen_releases(user_id: str, limit: int) -> List[int]:
     """Devolver lanzamientos populares con los que el usuario no interactuo."""
     rows = _select(
@@ -738,6 +754,43 @@ def _user_profile(user_id: str, min_rating: float) -> dict:
     if not positive:
         return {"genres": {}, "artists": {}, "total_weight": 0.0}
 
+    # Pre-cargar géneros y artistas en batch para todas las interacciones positivas
+    release_ids = [interaction.release_id for interaction in positive]
+    if not release_ids:
+        return {"genres": {}, "artists": {}, "total_weight": 0.0}
+
+    # Batch load géneros
+    placeholders = ",".join("?" for _ in release_ids)
+    genre_rows = _select(
+        f"""
+        SELECT id_release, id_genre
+        FROM release_genres
+        WHERE id_release IN ({placeholders});
+        """,
+        release_ids,
+    )
+    release_to_genres: Dict[int, List[int]] = collections.defaultdict(list)
+    for row in genre_rows:
+        release_id = int(row["id_release"])
+        genre_id = int(row["id_genre"])
+        release_to_genres[release_id].append(genre_id)
+
+    # Batch load artistas
+    artist_rows = _select(
+        f"""
+        SELECT id_release, artist_id
+        FROM releases
+        WHERE id_release IN ({placeholders});
+        """,
+        release_ids,
+    )
+    release_to_artist: Dict[int, int] = {}
+    for row in artist_rows:
+        release_id = int(row["id_release"])
+        artist_id = int(row["artist_id"])
+        if artist_id > 0:
+            release_to_artist[release_id] = artist_id
+
     weight_by_genre: Dict[int, float] = collections.defaultdict(float)
     weight_by_artist: Dict[int, float] = collections.defaultdict(float)
 
@@ -752,14 +805,14 @@ def _user_profile(user_id: str, min_rating: float) -> dict:
             recency_weight = 1.0
         base_weight = rating_weight * recency_weight
 
-        genres = release_genres(interaction.release_id)
-        artists = [release_artist_id(interaction.release_id)]
+        genres = list(release_to_genres.get(interaction.release_id, []))
+        artist_id = release_to_artist.get(interaction.release_id)
 
         for genre_id in genres:
             weight_by_genre[genre_id] += base_weight / len(genres or [1])
 
-        for artist_id in artists:
-            weight_by_artist[artist_id] += base_weight / len(artists or [1])
+        if artist_id:
+            weight_by_artist[artist_id] += base_weight
 
     total_weight = sum(weight_by_genre.values()) + sum(weight_by_artist.values())
     return {
@@ -769,7 +822,8 @@ def _user_profile(user_id: str, min_rating: float) -> dict:
     }
 
 
-def release_genres(release_id: int) -> List[int]:
+@functools.lru_cache(maxsize=10000)
+def release_genres(release_id: int) -> tuple:
     rows = _select(
         """
         SELECT id_genre
@@ -778,9 +832,10 @@ def release_genres(release_id: int) -> List[int]:
         """,
         [release_id],
     )
-    return [int(row["id_genre"]) for row in rows]
+    return tuple(int(row["id_genre"]) for row in rows)
 
 
+@functools.lru_cache(maxsize=10000)
 def release_artist_id(release_id: int) -> int:
     rows = _select("SELECT artist_id FROM releases WHERE id_release = ?;", [release_id])
     if not rows:
@@ -828,19 +883,27 @@ def _content_score(
     genre_weight: float,
     artist_weight: float,
     popularity_prior: float,
+    release_data: dict | None = None,
+    genres: List[int] | None = None,
+    artist_id: int | None = None,
 ) -> float:
-    genres = release_genres(release_id)
-    artist_id = release_artist_id(release_id)
+    # Usar géneros y artist_id pre-cargados si están disponibles, sino cargar
+    if genres is None:
+        genres_list = list(release_genres(release_id))
+    else:
+        genres_list = genres
+    if artist_id is None:
+        artist_id = release_artist_id(release_id)
 
     score = 0.0
 
-    for genre_id in genres:
+    for genre_id in genres_list:
         score += genre_weight * profile["genres"].get(genre_id, 0.0)
 
-    if artist_id in profile["artists"]:
+    if artist_id and artist_id > 0 and artist_id in profile["artists"]:
         score += artist_weight * profile["artists"][artist_id]
 
-    release = release_detail(release_id)
+    release = release_data if release_data is not None else release_detail(release_id)
     if release:
         ratings_count = release.get("ratings_count") or 0
         avg_rating = release.get("avg_rating") or 0.0
@@ -863,7 +926,10 @@ def recommend_content_based(
     genre_weight: float = 1.0,
     artist_weight: float = 0.8,
     popularity_prior: float = 0.3,
+    interactions: List[Interaction] | None = None,
 ) -> List[int]:
+    if interactions is None:
+        interactions = _user_interactions(user_id)
     profile = _user_profile(user_id, min_rating)
     if profile["total_weight"] <= 0:
         return []
@@ -879,7 +945,37 @@ def recommend_content_based(
     if not candidates:
         return []
 
-    seen_ids = set(rated_release_ids(user_id) + seen_release_ids(user_id))
+    seen_ids = _user_seen_release_ids(user_id)
+    filtered_candidates = [c for c in candidates if c not in seen_ids]
+
+    if not filtered_candidates:
+        return []
+
+    # Pre-cargar todos los detalles de releases, géneros y artistas en batch
+    releases_map = release_details_map(filtered_candidates)
+
+    # Batch load géneros para todos los candidatos
+    placeholders = ",".join("?" for _ in filtered_candidates)
+    genre_rows = _select(
+        f"""
+        SELECT id_release, id_genre
+        FROM release_genres
+        WHERE id_release IN ({placeholders});
+        """,
+        filtered_candidates,
+    )
+    release_to_genres: Dict[int, List[int]] = collections.defaultdict(list)
+    for row in genre_rows:
+        release_id = int(row["id_release"])
+        genre_id = int(row["id_genre"])
+        release_to_genres[release_id].append(genre_id)
+
+    # Los artist_id ya están en releases_map, extraerlos
+    release_to_artist: Dict[int, int] = {}
+    for release_id, release_data in releases_map.items():
+        artist_id = release_data.get("artist_id")
+        if artist_id:
+            release_to_artist[release_id] = int(artist_id)
 
     scores = {
         candidate: _content_score(
@@ -888,9 +984,11 @@ def recommend_content_based(
             genre_weight,
             artist_weight,
             popularity_prior,
+            release_data=releases_map.get(candidate),
+            genres=release_to_genres.get(candidate, []),
+            artist_id=release_to_artist.get(candidate),
         )
-        for candidate in candidates
-        if candidate not in seen_ids
+        for candidate in filtered_candidates
     }
 
     ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
@@ -902,8 +1000,10 @@ def recommend_from_pairs(
     *,
     limit: int = 9,
     min_rating: float = _DEFAULT_POSITIVE_RATING,
+    interactions: List[Interaction] | None = None,
 ) -> List[int]:
-    interactions = _user_interactions(user_id)
+    if interactions is None:
+        interactions = _user_interactions(user_id)
     positive = [interaction for interaction in interactions if interaction.rating >= min_rating]
     if not positive:
         return []
@@ -940,15 +1040,15 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
     explanations: List[str] = []
 
     if len(positive_interactions) <= Config.max_pairs_signals:
-        candidates = recommend_from_pairs(user_id, limit=limit)
+        candidates = recommend_from_pairs(user_id, limit=limit, interactions=interactions)
         if candidates:
             explanations.append("Basado en discos que calificaste positivamente")
-            _cache_last_strategy(user_id, "pairs")
+        _cache_last_strategy(user_id, "pairs")
     else:
-        candidates = recommend_content_based(user_id, limit=limit)
+        candidates = recommend_content_based(user_id, limit=limit, interactions=interactions)
         if candidates:
             explanations.append("Basado en tus géneros y artistas con mejor puntaje")
-            _cache_last_strategy(user_id, "content")
+        _cache_last_strategy(user_id, "content")
 
     if len(candidates) < limit:
         supplemental = _popular_unseen_releases(user_id, limit)
@@ -970,12 +1070,35 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
 
 
 def _diversify_by_artist(release_ids: Sequence[int], *, limit: int) -> List[int]:
+    if not release_ids:
+        return []
+
+    # Pre-cargar artist_ids en una sola query
+    unique_ids = list(dict.fromkeys(release_ids))
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = _select(
+        f"""
+        SELECT id_release, artist_id
+        FROM releases
+        WHERE id_release IN ({placeholders});
+        """,
+        unique_ids,
+    )
+    release_to_artist: Dict[int, int] = {
+        int(row["id_release"]): int(row["artist_id"]) for row in rows
+    }
+
     diversified: List[int] = []
     seen_artists: set[int] = set()
     secondary_bucket: List[int] = []
 
     for release_id in release_ids:
-        artist_id = release_artist_id(release_id)
+        artist_id = release_to_artist.get(release_id, -1)
+        if artist_id <= 0:
+            # Si no encontramos el artista, lo ponemos en el bucket secundario
+            secondary_bucket.append(release_id)
+            continue
+
         if artist_id not in seen_artists:
             diversified.append(release_id)
             seen_artists.add(artist_id)
@@ -993,7 +1116,7 @@ def _diversify_by_artist(release_ids: Sequence[int], *, limit: int) -> List[int]
 def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int]:
     """Recomendar lanzamientos vinculados a un lanzamiento dado, excluyendo los vistos."""
 
-    seen_ids = set(rated_release_ids(user_id) + seen_release_ids(user_id))
+    seen_ids = _user_seen_release_ids(user_id)
 
     candidates: List[int] = []
 
@@ -1029,17 +1152,18 @@ def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int
 
     if len(candidates) < limit:
         release_artist = release_artist_id(release_id)
-        artist_rows = _select(
-            """
-            SELECT id_release
-            FROM releases
-            WHERE artist_id = ? AND id_release <> ?
-            ORDER BY release_year DESC NULLS LAST
-            LIMIT ?;
-            """,
-            [release_artist, release_id, limit * 2],
-        )
-        candidates.extend(int(row["id_release"]) for row in artist_rows)
+        if release_artist > 0:
+            artist_rows = _select(
+                """
+                SELECT id_release
+                FROM releases
+                WHERE artist_id = ? AND id_release <> ?
+                ORDER BY release_year DESC NULLS LAST
+                LIMIT ?;
+                """,
+                [release_artist, release_id, limit * 2],
+            )
+            candidates.extend(int(row["id_release"]) for row in artist_rows)
 
     filtered = [
         candidate
@@ -1113,8 +1237,47 @@ def release_detail(release_id: int) -> dict | None:
 
 
 def release_details_map(release_ids: Sequence[int]) -> Dict[int, dict]:
-    details_list = release_details(release_ids)
-    return {item["id_release"]: item for item in details_list}
+    """Devolver un diccionario de id_release -> dict con metadata, optimizado."""
+    ids = [int(release_id) for release_id in release_ids if release_id is not None]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = _select(
+        f"""
+        SELECT
+            r.id_release,
+            r.title,
+            r.artist_id,
+            r.release_type,
+            r.release_year,
+            r.label,
+            r.avg_rating,
+            r.ratings_count,
+            r.art_url,
+            a.name AS artist_name,
+            a.country AS artist_country
+        FROM releases AS r
+        JOIN artists AS a ON a.id_artist = r.artist_id
+        WHERE r.id_release IN ({placeholders});
+        """,
+        ids,
+    )
+    return {
+        int(row["id_release"]): {
+            "id_release": int(row["id_release"]),
+            "title": row["title"],
+            "artist_id": int(row["artist_id"]),
+            "release_type": row["release_type"],
+            "release_year": row["release_year"],
+            "label": row["label"],
+            "avg_rating": row["avg_rating"],
+            "ratings_count": row["ratings_count"],
+            "art_url": row["art_url"],
+            "artist_name": row["artist_name"],
+            "artist_country": row["artist_country"],
+        }
+        for row in rows
+    }
 
 
 def artist_detail(artist_id: int) -> dict | None:
@@ -1183,7 +1346,8 @@ def releases_by_artist(artist_id: int) -> List[dict]:
     ]
 
 
-def list_genres(limit: int = 200) -> List[dict]:
+@functools.lru_cache(maxsize=1)
+def list_genres(limit: int = 200) -> tuple:
     """Devolver una lista ordenada de géneros disponibles."""
     rows = _select(
         """
@@ -1194,16 +1358,17 @@ def list_genres(limit: int = 200) -> List[dict]:
         """,
         [limit],
     )
-    return [
+    return tuple(
         {
             "id_genre": int(row["id_genre"]),
             "name": row["name"],
         }
         for row in rows
-    ]
+    )
 
 
-def list_release_years(limit: int = 120) -> List[int]:
+@functools.lru_cache(maxsize=1)
+def list_release_years(limit: int = 120) -> tuple:
     """Listar años de lanzamiento disponibles ordenados de forma descendente."""
     rows = _select(
         """
@@ -1215,10 +1380,11 @@ def list_release_years(limit: int = 120) -> List[int]:
         """,
         [limit],
     )
-    return [int(row["release_year"]) for row in rows]
+    return tuple(int(row["release_year"]) for row in rows)
 
 
-def list_release_types() -> List[str]:
+@functools.lru_cache(maxsize=1)
+def list_release_types() -> tuple:
     """Listar los tipos de lanzamiento disponibles (LP, EP, etc)."""
     rows = _select(
         """
@@ -1228,7 +1394,7 @@ def list_release_types() -> List[str]:
         ORDER BY release_type ASC;
         """
     )
-    return [str(row["release_type"]) for row in rows]
+    return tuple(str(row["release_type"]) for row in rows)
 
 
 _CATALOG_BASE_FROM = """
@@ -1406,8 +1572,8 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "id": "pairs",
         "name": "Co-ocurrencia (release_pairs)",
         "description": (
-            "Aprovecha discos que suelen aparecer juntos cuando tenés algunas "
-            "calificaciones positivas."
+            "Aprovecha discos que suelen aparecer juntos cuando tenés hasta "
+            "8 calificaciones positivas."
         ),
     },
     {

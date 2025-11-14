@@ -243,9 +243,9 @@ def recommendations():
     rated_count = len(recommender.rated_release_ids(user_id))
     seen_count = len(recommender.seen_release_ids(user_id))
     explanations = recommender.last_explanations(user_id)
-    genre_options = recommender.list_genres()
-    year_options = recommender.list_release_years()
-    type_options = recommender.list_release_types()
+    genre_options = list(recommender.list_genres())
+    year_options = list(recommender.list_release_years())
+    type_options = list(recommender.list_release_types())
 
     current_query_params = request.args.to_dict(flat=True)
     if has_filters:
