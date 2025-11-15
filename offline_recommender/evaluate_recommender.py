@@ -7,6 +7,7 @@ import csv
 import logging
 import random
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
@@ -148,6 +149,83 @@ def build_candidate_pool(
     return list(pool)
 
 
+def load_release_metadata(
+    connection: sqlite3.Connection,
+    release_ids: List[int],
+) -> tuple[dict[int, list[int]], dict[int, int], dict[int, int]]:
+    """Cargar metadata de releases: géneros (desde releases y artistas), artistas, ratings_count."""
+    if not release_ids:
+        return {}, {}, {}
+
+    placeholders = ",".join("?" for _ in release_ids)
+
+    # Cargar artistas y ratings_count primero (necesarios para obtener géneros de artistas)
+    release_rows = connection.execute(
+        f"""
+        SELECT id_release, artist_id, ratings_count
+        FROM releases
+        WHERE id_release IN ({placeholders});
+        """,
+        release_ids,
+    ).fetchall()
+    release_to_artist: dict[int, int] = {}
+    release_to_ratings_count: dict[int, int] = {}
+    artist_ids_set: set[int] = set()
+
+    for row in release_rows:
+        release_id = int(row["id_release"])
+        artist_id = int(row["artist_id"] or 0)
+        ratings_count = int(row["ratings_count"] or 0)
+        if artist_id > 0:
+            release_to_artist[release_id] = artist_id
+            artist_ids_set.add(artist_id)
+        release_to_ratings_count[release_id] = ratings_count
+
+    # Cargar géneros directamente de releases
+    genre_rows = connection.execute(
+        f"""
+        SELECT id_release, id_genre
+        FROM release_genres
+        WHERE id_release IN ({placeholders});
+        """,
+        release_ids,
+    ).fetchall()
+    release_to_genres: dict[int, list[int]] = defaultdict(list)
+    for row in genre_rows:
+        release_id = int(row["id_release"])
+        genre_id = int(row["id_genre"])
+        release_to_genres[release_id].append(genre_id)
+
+    # Cargar géneros desde artistas para releases que no tienen géneros directos
+    if artist_ids_set:
+        artist_placeholders = ",".join("?" for _ in artist_ids_set)
+        artist_genre_rows = connection.execute(
+            f"""
+            SELECT id_artist, id_genre
+            FROM artist_genres
+            WHERE id_artist IN ({artist_placeholders});
+            """,
+            list(artist_ids_set),
+        ).fetchall()
+
+        # Crear mapeo artista -> géneros
+        artist_to_genres: dict[int, list[int]] = defaultdict(list)
+        for row in artist_genre_rows:
+            artist_id = int(row["id_artist"])
+            genre_id = int(row["id_genre"])
+            artist_to_genres[artist_id].append(genre_id)
+
+        # Agregar géneros de artistas a releases que no tienen géneros directos
+        for release_id, artist_id in release_to_artist.items():
+            if release_id not in release_to_genres or not release_to_genres[release_id]:
+                # Si el release no tiene géneros directos, usar los del artista
+                artist_genres = artist_to_genres.get(artist_id, [])
+                if artist_genres:
+                    release_to_genres[release_id] = artist_genres
+
+    return release_to_genres, release_to_artist, release_to_ratings_count
+
+
 def evaluate_user(
     connection: sqlite3.Connection,
     user_id: str,
@@ -171,24 +249,74 @@ def evaluate_user(
         recommended_random = recommender.recommend_random(user_id, limit=k)
         recommended_popular = recommender._popular_unseen_releases(user_id, k)
 
-    relevance_map = {release_id: 1.0 for release_id in holdout}
+    # Cargar metadata para todas las recomendaciones
+    all_recommended_ids = (
+        recommended_hybrid
+        + recommended_advanced
+        + recommended_nmf
+        + recommended_two_towers
+        + recommended_pairs
+        + recommended_content
+        + recommended_random
+        + recommended_popular
+    )
+    unique_release_ids = list(set(all_recommended_ids))
+    release_to_genres, release_to_artist, release_to_ratings_count = load_release_metadata(
+        connection, unique_release_ids
+    )
 
-    def ndcg_for(recommended: List[int]) -> float:
-        scores = [relevance_map.get(release_id, 0.0) for release_id in recommended]
-        return metrics.normalized_discounted_cumulative_gain(scores)
+    # Obtener max_ratings_count para novelty
+    max_ratings_count_row = connection.execute(
+        "SELECT MAX(ratings_count) as max_count FROM releases"
+    ).fetchone()
+    max_ratings_count = int(max_ratings_count_row["max_count"] or 1)
 
-    return {
+    relevance_set = set(holdout)
+
+    def calculate_metrics(recommended: List[int], prefix: str) -> dict:
+        """Calcular todas las métricas para una lista de recomendaciones."""
+        if not recommended:
+            return {
+                f"{prefix}_ndcg": 0.0,
+                f"{prefix}_precision": 0.0,
+                f"{prefix}_recall": 0.0,
+                f"{prefix}_f1": 0.0,
+                f"{prefix}_mrr": 0.0,
+                f"{prefix}_genre_diversity": 0.0,
+                f"{prefix}_artist_diversity": 0.0,
+                f"{prefix}_novelty": 0.0,
+            }
+
+        scores = [1.0 if release_id in relevance_set else 0.0 for release_id in recommended]
+        return {
+            f"{prefix}_ndcg": metrics.normalized_discounted_cumulative_gain(scores),
+            f"{prefix}_precision": metrics.precision_at_k(recommended, relevance_set, k),
+            f"{prefix}_recall": metrics.recall_at_k(recommended, relevance_set, k),
+            f"{prefix}_f1": metrics.f1_at_k(recommended, relevance_set, k),
+            f"{prefix}_mrr": metrics.mean_reciprocal_rank(recommended, relevance_set),
+            f"{prefix}_genre_diversity": metrics.genre_diversity(recommended, release_to_genres),
+            f"{prefix}_artist_diversity": metrics.artist_diversity(recommended, release_to_artist),
+            f"{prefix}_novelty": metrics.novelty(
+                recommended, release_to_ratings_count, max_ratings_count
+            ),
+        }
+
+    result = {
         "user_id": user_id,
-        "ndcg_hybrid": ndcg_for(recommended_hybrid),
-        "ndcg_advanced": ndcg_for(recommended_advanced),
-        "ndcg_nmf": ndcg_for(recommended_nmf),
-        "ndcg_two_towers": ndcg_for(recommended_two_towers),
-        "ndcg_pairs": ndcg_for(recommended_pairs),
-        "ndcg_content": ndcg_for(recommended_content),
-        "ndcg_random": ndcg_for(recommended_random),
-        "ndcg_popular": ndcg_for(recommended_popular),
         "holdout_size": len(holdout),
     }
+
+    # Calcular métricas para cada estrategia
+    result.update(calculate_metrics(recommended_hybrid, "hybrid"))
+    result.update(calculate_metrics(recommended_advanced, "advanced"))
+    result.update(calculate_metrics(recommended_nmf, "nmf"))
+    result.update(calculate_metrics(recommended_two_towers, "two_towers"))
+    result.update(calculate_metrics(recommended_pairs, "pairs"))
+    result.update(calculate_metrics(recommended_content, "content"))
+    result.update(calculate_metrics(recommended_random, "random"))
+    result.update(calculate_metrics(recommended_popular, "popular"))
+
+    return result
 
 
 def evaluate(
@@ -215,44 +343,75 @@ def evaluate(
             if not result:
                 continue
             results.append(result)
-            LOGGER.debug(
-                "%s -> NDCG hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
-                "pairs=%.4f content=%.4f",
-                user_id,
-                result["ndcg_hybrid"],
-                result["ndcg_advanced"],
-                result["ndcg_nmf"],
-                result["ndcg_two_towers"],
-                result["ndcg_pairs"],
-                result["ndcg_content"],
-            )
+            if verbose:
+                LOGGER.debug(
+                    "%s -> NDCG hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
+                    "pairs=%.4f content=%.4f | Precision hybrid=%.4f advanced=%.4f",
+                    user_id,
+                    result["hybrid_ndcg"],
+                    result["advanced_ndcg"],
+                    result["nmf_ndcg"],
+                    result["two_towers_ndcg"],
+                    result["pairs_ndcg"],
+                    result["content_ndcg"],
+                    result["hybrid_precision"],
+                    result["advanced_precision"],
+                )
 
     if not results:
         LOGGER.warning("No results collected; check filters")
         return
 
-    avg_hybrid = sum(item["ndcg_hybrid"] for item in results) / len(results)
-    avg_advanced = sum(item["ndcg_advanced"] for item in results) / len(results)
-    avg_nmf = sum(item["ndcg_nmf"] for item in results) / len(results)
-    avg_two_towers = sum(item["ndcg_two_towers"] for item in results) / len(results)
-    avg_pairs = sum(item["ndcg_pairs"] for item in results) / len(results)
-    avg_content = sum(item["ndcg_content"] for item in results) / len(results)
-    avg_random = sum(item["ndcg_random"] for item in results) / len(results)
-    avg_popular = sum(item["ndcg_popular"] for item in results) / len(results)
+    # Calcular promedios para todas las métricas
+    strategies = [
+        "hybrid",
+        "advanced",
+        "nmf",
+        "two_towers",
+        "pairs",
+        "content",
+        "random",
+        "popular",
+    ]
+    metric_names = [
+        "ndcg",
+        "precision",
+        "recall",
+        "f1",
+        "mrr",
+        "genre_diversity",
+        "artist_diversity",
+        "novelty",
+    ]
 
-    LOGGER.info(
-        "Average NDCG@%d hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
-        "pairs=%.4f content=%.4f random=%.4f popular=%.4f",
-        k,
-        avg_hybrid,
-        avg_advanced,
-        avg_nmf,
-        avg_two_towers,
-        avg_pairs,
-        avg_content,
-        avg_random,
-        avg_popular,
-    )
+    averages = {}
+    for strategy in strategies:
+        for metric in metric_names:
+            key = f"{strategy}_{metric}"
+            if key in results[0]:
+                averages[key] = sum(item[key] for item in results) / len(results)
+
+    # Mostrar resumen de métricas principales
+    LOGGER.info("=" * 80)
+    LOGGER.info("Average Metrics@%d", k)
+    LOGGER.info("=" * 80)
+
+    for strategy in strategies:
+        LOGGER.info(
+            "%s: NDCG=%.4f Precision=%.4f Recall=%.4f F1=%.4f MRR=%.4f "
+            "GenreDiv=%.4f ArtistDiv=%.4f Novelty=%.4f",
+            strategy.upper(),
+            averages.get(f"{strategy}_ndcg", 0.0),
+            averages.get(f"{strategy}_precision", 0.0),
+            averages.get(f"{strategy}_recall", 0.0),
+            averages.get(f"{strategy}_f1", 0.0),
+            averages.get(f"{strategy}_mrr", 0.0),
+            averages.get(f"{strategy}_genre_diversity", 0.0),
+            averages.get(f"{strategy}_artist_diversity", 0.0),
+            averages.get(f"{strategy}_novelty", 0.0),
+        )
+
+    LOGGER.info("=" * 80)
 
     if output:
         fieldnames = list(results[0].keys())
