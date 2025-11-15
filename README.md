@@ -267,11 +267,13 @@ pre-commit run --all-files
 
 - Página principal: evalúa las señales del usuario y elige entre múltiples estrategias según el historial:
   - **Co-ocurrencia** (`release_pairs`) para usuarios con ≤8 calificaciones positivas.
-  - **Perfiles de contenido** (géneros y artistas) para usuarios con 9-19 calificaciones positivas.
+  - **Two Towers (Deep Learning)** para usuarios con 10-19 calificaciones positivas (requiere embeddings precomputados).
   - **Factorización matricial (NMF)** para usuarios con ≥20 calificaciones positivas (requiere embeddings precomputados).
+  - **Perfiles de contenido** (géneros y artistas) como fallback cuando Two Towers o NMF no están disponibles.
   - **Popularidad** como fallback inicial.
   - Si aún quedan slots vacíos, mezcla candidatos populares y aleatorios para diversificar.
 - Página de contexto: ensambla candidatos combinando `release_recommendations`, vecinos por `release_pairs`, otros lanzamientos del artista y populares no vistos.
+- Los usuarios con ≥10 calificaciones positivas pueden generar o actualizar su embedding Two Towers desde la interfaz web usando el botón "Generar Two Towers" o "Actualizar Two Towers".
 - Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding NMF desde la interfaz web usando el botón "Generar NMF" o "Actualizar NMF".
 - Todas las interacciones se persisten en `interactions` con `rating` en [0, 5] y `rating_date = now()`.
 
@@ -280,17 +282,19 @@ pre-commit run --all-files
 - Lógica central en `app/recommender.py` con configuración agrupada en la clase `Config`.
 - Estrategias implementadas:
   - `recommend_from_pairs`: mezcla señales de co-ocurrencia ponderando rating y recencia.
+  - `recommend_two_towers`: aprendizaje profundo usando embeddings precomputados (Two Towers).
   - `recommend_content_based`: perfiles de usuario por géneros y artistas con prior de popularidad.
   - `recommend_nmf`: factorización matricial usando embeddings precomputados (NMF).
   - `recommend_random`: muestreo uniforme de lanzamientos no vistos para exploración controlada.
 - Lógica híbrida en `recommend`:
   - Usuarios sin ratings → populares + aleatorios.
   - Hasta 8 ratings positivos → co-ocurrencia.
-  - 9-19 ratings positivos → contenido.
-  - 20+ ratings positivos → NMF (con fallback a contenido si embeddings no disponibles).
+  - 10-19 ratings positivos → Two Towers (con fallback a contenido si embeddings no disponibles).
+  - 20+ ratings positivos → NMF (con fallback a Two Towers, luego contenido si embeddings no disponibles).
   - Diversificación por artista para evitar repeticiones.
 - `recommend_context` sigue la misma filosofía: recomendaciones directas, pares, artista y fallback popular.
 - La app muestra explicaciones en la UI y expone `last_strategy` / `last_context_strategy` para instrumentación.
+- Los usuarios con ≥10 calificaciones positivas pueden actualizar su embedding Two Towers desde la interfaz web.
 - Los usuarios con ≥20 calificaciones positivas pueden actualizar su embedding NMF desde la interfaz web.
 
 ### Rebuilding de co-ocurrencias
@@ -323,11 +327,30 @@ pre-commit run --all-files
 - Los usuarios pueden actualizar sus embeddings individuales desde la interfaz web (botón "Generar NMF" o "Actualizar NMF").
 - Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema.
 
+### Construcción de embeddings Two Towers
+
+- Tablas `user_embeddings_dl` y `release_embeddings_dl` almacenan vectores de aprendizaje profundo.
+- Script `offline_recommender/build_two_towers.py` entrena el modelo y construye embeddings (requerido para usar Two Towers):
+
+    ```bash
+    python offline_recommender/build_two_towers.py \
+        --database data/sputnik.db \
+        --embedding-dim 64 \
+        --epochs 10 \
+        --batch-size 1024 \
+        --min-user-ratings 5 \
+        --min-release-ratings 3
+    ```
+
+- Los usuarios pueden actualizar sus embeddings individuales desde la interfaz web (botón "Generar Two Towers" o "Actualizar Two Towers").
+- El modelo y los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema (típicamente semanal, tiempo estimado: 3-6 horas para datasets grandes).
+
 ### Configuración rápida de hiperparámetros
 
 - La clase `Config` permite modificar sin tocar la lógica:
   - `positive_rating_threshold`: rating mínimo para considerar "señal positiva" (default: 3.0).
   - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares (default: 8).
+  - `min_two_towers_signals`: mínimo de ratings positivos para activar Two Towers (default: 10).
   - `min_nmf_signals`: mínimo de ratings positivos para activar NMF (default: 20).
   - `genre_weight` / `artist_weight` / `popularity_prior`: balance de cada componente en el score content-based.
   - `recency_log_base`: logaritmo usado para atenuar la recencia.

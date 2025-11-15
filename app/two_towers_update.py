@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
 
 
 try:
@@ -13,7 +16,173 @@ try:
 except ImportError:
     np = None  # type: ignore
 
+try:
+    from tensorflow import keras
+except ImportError:
+    keras = None  # type: ignore
+
 LOGGER = logging.getLogger("two_towers_update")
+
+
+def _extract_user_features(
+    connection: sqlite3.Connection, user_id: str, now: datetime | None = None
+) -> dict[str, float | int]:
+    """Extract user features from database (same as in build_two_towers.py)."""
+    if now is None:
+        now = datetime.utcnow()
+
+    cursor = connection.execute(
+        """
+        SELECT role, join_date, last_active, objectivity_score, soundoffs, ratings_count
+        FROM users
+        WHERE id_user = ?;
+        """,
+        (user_id,),
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        # Return default features for missing users
+        return {
+            "role_idx": 0,
+            "objectivity_score": 0.5,
+            "soundoffs": 0.0,
+            "ratings_count": 0.0,
+            "days_since_join": 0.0,
+            "days_since_active": 0.0,
+        }
+
+    role_str = row["role"] or "user"
+    join_date_str = row["join_date"]
+    last_active_str = row["last_active"]
+    objectivity_score = float(row["objectivity_score"] or 50.0)
+    soundoffs = int(row["soundoffs"] or 0)
+    ratings_count = int(row["ratings_count"] or 0)
+
+    # Map role to index (simplified: 0=user, 1=admin, 2=mod, etc.)
+    role_map = {
+        "user": 0,
+        "admin": 1,
+        "moderator": 2,
+        "contributor": 3,
+        "staff": 4,
+    }
+    role_idx = role_map.get(role_str.lower(), 0)
+
+    # Normalize objectivity_score (0-100 -> 0-1)
+    objectivity_norm = max(0.0, min(1.0, objectivity_score / 100.0))
+
+    # Log normalize soundoffs and ratings_count
+    soundoffs_norm = math.log1p(soundoffs)
+    ratings_count_norm = math.log1p(ratings_count)
+
+    # Calculate days since join and last active
+    days_since_join = 0.0
+    if join_date_str:
+        try:
+            join_date = datetime.fromisoformat(join_date_str.replace("Z", "+00:00"))
+            days_since_join = max(0.0, (now - join_date.replace(tzinfo=None)).days)
+        except (ValueError, AttributeError):
+            days_since_join = 0.0
+
+    days_since_active = 0.0
+    if last_active_str:
+        try:
+            last_active = datetime.fromisoformat(last_active_str.replace("Z", "+00:00"))
+            days_since_active = max(0.0, (now - last_active.replace(tzinfo=None)).days)
+        except (ValueError, AttributeError):
+            days_since_active = 0.0
+
+    # Normalize days (assume max 20 years = 7300 days)
+    days_since_join_norm = min(1.0, days_since_join / 7300.0)
+    days_since_active_norm = min(1.0, days_since_active / 365.0)  # Max 1 year inactive
+
+    return {
+        "role_idx": role_idx,
+        "objectivity_score": objectivity_norm,
+        "soundoffs": soundoffs_norm,
+        "ratings_count": ratings_count_norm,
+        "days_since_join": days_since_join_norm,
+        "days_since_active": days_since_active_norm,
+    }
+
+
+def _load_user_tower_model(
+    connection: sqlite3.Connection,
+) -> tuple[keras.Model | None, dict | None]:
+    """Load the user tower model for the current database."""
+    if keras is None:
+        LOGGER.warning("TensorFlow/Keras no está disponible, usando aproximación por promedio")
+        return None, None
+
+    try:
+        # Get database path from connection
+        # Try PRAGMA database_list first
+        db_info = connection.execute("PRAGMA database_list").fetchone()
+        if db_info and len(db_info) > 2:
+            db_path = Path(db_info[2])
+        else:
+            # Fallback: try to get from connection string or use default
+            # For in-memory or attached databases, we might need a different approach
+            # Try to infer from the recommender's database resolution
+            from app.recommender import _resolve_database_path
+
+            db_path = _resolve_database_path()
+
+        db_name = db_path.stem  # e.g., "sputnik" or "sputnik_lite"
+
+        # Try to load model and metadata
+        models_dir = Path(__file__).resolve().parents[1] / "models"
+        model_path = models_dir / f"user_tower_{db_name}.keras"
+        metadata_path = models_dir / f"user_tower_{db_name}_metadata.json"
+
+        if not model_path.exists() or not metadata_path.exists():
+            LOGGER.info(
+                "Modelo no encontrado en %s, usando aproximación por promedio",
+                model_path,
+            )
+            return None, None
+
+        LOGGER.info("Cargando modelo desde %s", model_path)
+        # Habilitar deserialización insegura para Lambda layers
+        # (necesario para el modelo Two Towers)
+        import tensorflow as tf
+
+        tf.keras.config.enable_unsafe_deserialization()
+
+        # Definir las funciones custom que usa el modelo (deben coincidir con las del entrenamiento)
+        def l2_normalize_user(x):
+            return tf.nn.l2_normalize(x, axis=1)
+
+        def l2_normalize_item(x):
+            return tf.nn.l2_normalize(x, axis=1)
+
+        def squeeze_score(x):
+            return tf.squeeze(x, axis=-1)
+
+        custom_objects = {
+            "l2_normalize_user": l2_normalize_user,
+            "l2_normalize_item": l2_normalize_item,
+            "squeeze_score": squeeze_score,
+        }
+
+        try:
+            model = keras.models.load_model(
+                str(model_path), compile=False, safe_mode=False, custom_objects=custom_objects
+            )
+        except Exception as e:
+            LOGGER.warning("Error cargando modelo keras: %s", e)
+            raise
+
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        LOGGER.info("Modelo cargado exitosamente (embedding_dim=%d)", metadata.get("embedding_dim"))
+        return model, metadata
+
+    except Exception as e:
+        LOGGER.warning("Error cargando modelo: %s, usando aproximación por promedio", e)
+        return None, None
 
 
 def update_user_embedding(
@@ -24,15 +193,8 @@ def update_user_embedding(
 ) -> bool:
     """Actualizar el embedding Two Towers de un usuario específico.
 
-    Esta función recalcula el embedding del usuario basándose en sus calificaciones
-    actuales y los embeddings de releases existentes. Usa un enfoque híbrido: calcula
-    el embedding del usuario como promedio ponderado de los embeddings de releases
-    que calificó positivamente, similar a cómo funciona NMF.
-
-    Esta aproximación funciona porque:
-    - Los embeddings de releases están normalizados con L2
-    - El producto escalar entre embeddings normalizados = similitud coseno
-    - Un promedio ponderado de embeddings normalizados sigue siendo un embedding válido
+    Intenta usar el modelo entrenado si está disponible, de lo contrario usa
+    una aproximación por promedio ponderado de embeddings de releases.
 
     Args:
         connection: Conexión a la base de datos
@@ -50,6 +212,104 @@ def update_user_embedding(
     # Configurar row_factory si no está configurado
     if connection.row_factory is None:
         connection.row_factory = sqlite3.Row
+
+    # Intentar cargar el modelo entrenado
+    user_tower_model, model_metadata = _load_user_tower_model(connection)
+
+    # Si tenemos el modelo, verificar si tiene sentido usarlo
+    if user_tower_model is not None and model_metadata is not None:
+        try:
+            # Extraer características del usuario
+            user_features = _extract_user_features(connection, user_id)
+
+            # Verificar si el usuario tiene características reales o solo valores por defecto
+            # Si todas las características están en valores por defecto,
+            # usar aproximación por promedio porque el modelo generaría embeddings
+            # casi idénticos para todos los usuarios nuevos
+            # Nota: ratings_count puede no estar actualizado en la tabla users, así que verificamos
+            # directamente las interacciones del usuario
+            interaction_count = (
+                connection.execute(
+                    "SELECT COUNT(*) as count FROM interactions WHERE id_user = ?",
+                    (user_id,),
+                ).fetchone()["count"]
+                or 0
+            )
+
+            has_real_features = (
+                interaction_count
+                > 0  # Tiene interacciones reales (más confiable que ratings_count)
+                or user_features["soundoffs"] > 0.0  # Ha escrito soundoffs
+                or user_features["objectivity_score"] != 0.5  # Tiene objectivity_score real
+                or user_features["days_since_join"] > 0.0  # Tiene fecha de registro
+                or user_features["role_idx"] != 0  # No es usuario común
+            )
+
+            if not has_real_features:
+                LOGGER.info(
+                    (
+                        "Usuario %s tiene solo características por defecto, "
+                        "usando aproximación por promedio"
+                    ),
+                    user_id,
+                )
+                # Continuar con aproximación por promedio (código más abajo)
+            else:
+                # Preparar inputs para el modelo
+                role_idx = np.array([user_features["role_idx"]], dtype=np.int32)
+                numeric_features = np.array(
+                    [
+                        [
+                            user_features["objectivity_score"],
+                            user_features["soundoffs"],
+                            user_features["ratings_count"],
+                            user_features["days_since_join"],
+                            user_features["days_since_active"],
+                        ]
+                    ],
+                    dtype=np.float32,
+                )
+
+                # Generar embedding usando el modelo
+                user_embedding = user_tower_model.predict([role_idx, numeric_features], verbose=0)[
+                    0
+                ]
+
+                # El modelo ya normaliza el embedding, así que está listo para usar
+                user_embedding_list = user_embedding.tolist()
+                detected_dim = model_metadata.get("embedding_dim", embedding_dim)
+
+                # Obtener model_version
+                model_version = model_metadata.get("model_version", "1.0")
+
+                # Guardar embedding
+                connection.execute(
+                    """
+                    INSERT INTO user_embeddings_dl (
+                        id_user, embedding_json, embedding_dim, model_version, last_updated
+                    )
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(id_user) DO UPDATE SET
+                        embedding_json = excluded.embedding_json,
+                        embedding_dim = excluded.embedding_dim,
+                        model_version = excluded.model_version,
+                        last_updated = datetime('now')
+                    """,
+                    (user_id, json.dumps(user_embedding_list), detected_dim, model_version),
+                )
+                connection.commit()
+
+                LOGGER.info(
+                    "Embedding Two Towers generado usando modelo entrenado para usuario %s",
+                    user_id,
+                )
+                return True
+
+        except Exception as e:
+            LOGGER.warning(
+                "Error usando modelo entrenado: %s, intentando aproximación por promedio", e
+            )
+            # Fallback a aproximación por promedio si hay error
 
     # Verificar que hay embeddings de releases disponibles y detectar embedding_dim
     release_count_row = connection.execute(

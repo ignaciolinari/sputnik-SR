@@ -244,18 +244,22 @@ def recommendations():
     ]
     user_ratings = recommender.user_ratings_map(user_id, all_release_ids)
 
-    rated_count = len(recommender.rated_release_ids(user_id))
-    seen_count = len(recommender.seen_release_ids(user_id))
+    # Optimización: obtener rated_count y seen_count en una sola consulta
+    rated_count, seen_count = recommender._user_interaction_counts(user_id)
     explanations = recommender.last_explanations(user_id)
 
-    # Verificar si el usuario puede usar NMF (siempre calcular para mostrar el botón)
-    positive_interactions = [
-        interaction
-        for interaction in recommender._user_interactions(user_id)
-        if interaction.rating >= recommender.Config.positive_rating_threshold
-    ]
-    can_use_nmf = len(positive_interactions) >= recommender.Config.min_nmf_signals
+    # Optimización: contar interacciones positivas sin cargar todas las interacciones
+    positive_count = recommender._count_positive_interactions(
+        user_id, recommender.Config.positive_rating_threshold
+    )
+    can_use_nmf = positive_count >= recommender.Config.min_nmf_signals
     has_nmf_embedding = recommender.user_has_nmf_embedding(user_id) if can_use_nmf else False
+
+    # Verificar si el usuario puede usar Two Towers (siempre calcular para mostrar el botón)
+    can_use_two_towers = positive_count >= recommender.Config.min_two_towers_signals
+    has_two_towers_embedding = (
+        recommender.user_has_two_towers_embedding(user_id) if can_use_two_towers else False
+    )
 
     genre_options = list(recommender.list_genres())
     year_options = list(recommender.list_release_years())
@@ -302,7 +306,9 @@ def recommendations():
         active_recommenders=recommender.active_recommendation_systems(),
         can_use_nmf=can_use_nmf,
         has_nmf_embedding=has_nmf_embedding,
-        positive_ratings_count=len(positive_interactions),
+        can_use_two_towers=can_use_two_towers,
+        has_two_towers_embedding=has_two_towers_embedding,
+        positive_ratings_count=positive_count,
     )
 
 

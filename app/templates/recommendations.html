@@ -29,6 +29,24 @@
                     🔒 Generar NMF
                 {% endif %}
             </button>
+            <button
+                id="update-two-towers-btn"
+                type="button"
+                class="ml-3 bg-purple-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-purple-500"
+                {% if can_use_two_towers %}
+                    {% if has_two_towers_embedding %}title="Actualizar recomendaciones basadas en aprendizaje profundo"{% else %}title="Generar recomendaciones basadas en aprendizaje profundo"{% endif %}
+                {% else %}
+                    title="Debes puntuar positivamente al menos 10 discos para desbloquear Two Towers"
+                    aria-label="Debes puntuar positivamente al menos 10 discos para desbloquear Two Towers"
+                    disabled
+                {% endif %}
+            >
+                {% if can_use_two_towers %}
+                    {% if has_two_towers_embedding %}🔄 Actualizar Two Towers{% else %}✨ Generar Two Towers{% endif %}
+                {% else %}
+                    🔒 Generar Two Towers
+                {% endif %}
+            </button>
         </h1>
         <div class="text-sm text-slate-600">
             {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
@@ -409,6 +427,54 @@
                         if (data.success) {
                             btn.textContent = "✅ " + (data.message || "Actualizado");
                             btn.classList.remove("bg-teal-500", "hover:bg-teal-600");
+                            btn.classList.add("bg-green-500", "hover:bg-green-600");
+
+                            // Recargar página después de 1 segundo para mostrar nuevas recomendaciones
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 1000);
+                        } else {
+                            alert(data.message || "Error al actualizar embedding");
+                            btn.textContent = originalText;
+                            btn.disabled = false;
+                        }
+                    } catch (error) {
+                        console.error("Error:", error);
+                        alert("Error al comunicarse con el servidor");
+                        btn.textContent = originalText;
+                        btn.disabled = false;
+                    }
+                });
+            }
+
+            // Manejar actualización de embedding Two Towers
+            const updateTwoTowersBtn = document.getElementById("update-two-towers-btn");
+            if (updateTwoTowersBtn) {
+                updateTwoTowersBtn.addEventListener("click", async function(event) {
+                    // Prevenir acción si el botón está deshabilitado
+                    if (this.disabled) {
+                        event.preventDefault();
+                        return;
+                    }
+
+                    const btn = this;
+                    const originalText = btn.textContent;
+                    btn.disabled = true;
+                    btn.textContent = "⏳ Procesando...";
+
+                    try {
+                        const response = await fetch("/actualizar-two-towers", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                            },
+                        });
+
+                        const data = await response.json();
+
+                        if (data.success) {
+                            btn.textContent = "✅ " + (data.message || "Actualizado");
+                            btn.classList.remove("bg-purple-500", "hover:bg-purple-600");
                             btn.classList.add("bg-green-500", "hover:bg-green-600");
 
                             // Recargar página después de 1 segundo para mostrar nuevas recomendaciones

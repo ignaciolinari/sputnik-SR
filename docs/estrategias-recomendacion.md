@@ -450,9 +450,43 @@ python -m offline_recommender.build_two_towers \
 
 ### Actualización de Embeddings
 
-Los embeddings deben regenerarse periódicamente cuando haya nuevas interacciones en el sistema. A diferencia de NMF, actualmente no hay actualización bajo demanda para usuarios individuales (requiere reentrenar el modelo completo).
+Los embeddings pueden actualizarse de dos formas:
 
-**Recomendación**: Reentrenar semanalmente o cuando haya cambios significativos en los datos.
+#### 1. Actualización Bajo Demanda (Recomendado)
+
+Los usuarios con ≥10 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón "Generar Two Towers" o "Actualizar Two Towers" junto a su nombre de usuario.
+
+**Ventajas:**
+- ✅ Actualización inmediata cuando el usuario califica nuevos discos
+- ✅ Intenta usar el modelo entrenado si está disponible, sino usa aproximación por promedio ponderado
+- ✅ No requiere acceso al servidor ni scripts offline
+- ✅ Disponible directamente desde la interfaz web
+
+**Cómo funciona:**
+- Si el modelo entrenado está disponible, genera el embedding usando las características del usuario
+- Si el modelo no está disponible, calcula un promedio ponderado de los embeddings de releases que el usuario calificó positivamente
+- Usa los embeddings de releases precomputados (que deben existir)
+- Guarda el nuevo embedding del usuario en la base de datos
+
+#### 2. Actualización Periódica Offline (Para Releases y Modelo)
+
+Los embeddings de releases y el modelo deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema:
+
+```bash
+# Reconstruir embeddings y modelo (típicamente semanal)
+python -m offline_recommender.build_two_towers \
+    --database data/sputnik.db \
+    --embedding-dim 64 \
+    --epochs 10 \
+    --batch-size 1024 \
+    --min-user-ratings 5 \
+    --min-release-ratings 3 \
+    --verbose
+```
+
+**Tiempo estimado**: 3-6 horas para datasets grandes (en CPU)
+
+**Nota**: Los usuarios pueden actualizar sus embeddings individuales en cualquier momento desde la interfaz. El modelo y los embeddings de releases deben regenerarse offline periódicamente para incluir nuevos releases y actualizar los patrones aprendidos globalmente.
 
 ### Comparación con NMF
 

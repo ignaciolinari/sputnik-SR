@@ -584,6 +584,26 @@ def rated_release_ids(user_id: str) -> List[int]:
     return [int(row["id_release"]) for row in rows]
 
 
+def _user_interaction_counts(user_id: str) -> tuple[int, int]:
+    """Obtener rated_count y seen_count en una sola consulta para optimizar."""
+    rows = _select(
+        """
+        SELECT
+            SUM(CASE WHEN rating > 0 THEN 1 ELSE 0 END) as rated_count,
+            SUM(CASE WHEN rating = 0 THEN 1 ELSE 0 END) as seen_count
+        FROM interactions
+        WHERE id_user = ?;
+        """,
+        [user_id],
+    )
+    if not rows or not rows[0]:
+        return (0, 0)
+    row = rows[0]
+    rated_count = int(row["rated_count"] or 0)
+    seen_count = int(row["seen_count"] or 0)
+    return (rated_count, seen_count)
+
+
 def user_ratings_map(user_id: str, release_ids: Sequence[int] | None = None) -> Dict[int, float]:
     """Devolver un diccionario de id_release -> rating para un usuario dado."""
 
@@ -645,6 +665,21 @@ def _user_interactions(user_id: str, min_rating: float | None = None) -> List[In
             )
         )
     return interactions
+
+
+def _count_positive_interactions(user_id: str, min_rating: float) -> int:
+    """Contar interacciones positivas sin cargar todas las interacciones."""
+    rows = _select(
+        """
+        SELECT COUNT(*) as count
+        FROM interactions
+        WHERE id_user = ? AND rating >= ?;
+        """,
+        [user_id, min_rating],
+    )
+    if not rows or not rows[0]:
+        return 0
+    return int(rows[0]["count"] or 0)
 
 
 def seen_release_ids(user_id: str) -> List[int]:
@@ -1234,13 +1269,10 @@ def user_has_nmf_embedding(user_id: str) -> bool:
         if not isinstance(embedding, list) or len(embedding) != n_factors:
             return False
 
-        # Verificar que hay releases con embeddings disponibles
-        # (no tiene sentido tener un embedding de usuario si no hay releases)
-        release_count_rows = _select("SELECT COUNT(*) as count FROM release_embeddings")
-        if release_count_rows and release_count_rows[0]["count"] > 0:
-            return True
-
-        return False
+        # No verificamos COUNT(*) aquí porque es costoso y redundante:
+        # Si hay embeddings de usuarios, es porque se generaron junto con embeddings de releases.
+        # Si no hay releases con embeddings, recommend_nmf() ya manejará ese caso.
+        return True
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         return False
 
@@ -1471,12 +1503,10 @@ def user_has_two_towers_embedding(user_id: str) -> bool:
         if not isinstance(embedding, list) or len(embedding) != embedding_dim:
             return False
 
-        # Verificar que hay releases con embeddings disponibles
-        release_count_rows = _select("SELECT COUNT(*) as count FROM release_embeddings_dl")
-        if release_count_rows and release_count_rows[0]["count"] > 0:
-            return True
-
-        return False
+        # No verificamos COUNT(*) aquí porque es costoso y redundante:
+        # Si hay embeddings de usuarios, es porque se generaron junto con embeddings de releases.
+        # Si no hay releases con embeddings, recommend_two_towers() ya manejará ese caso.
+        return True
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         return False
 
@@ -1896,8 +1926,13 @@ def count_catalog(
     return int(total)
 
 
+@functools.lru_cache(maxsize=1)
 def current_database_info() -> dict:
-    """Informar la base de datos actual y su variante (lite o completa)."""
+    """Informar la base de datos actual y su variante (lite o completa).
+
+    Cacheado porque la información de la base de datos no cambia frecuentemente.
+    El cache se invalida automáticamente cuando se reinicia el proceso.
+    """
 
     path = _resolve_database_path()
     filename = path.name

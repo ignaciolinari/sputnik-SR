@@ -240,7 +240,13 @@ def build_user_tower(num_roles: int = 10, embedding_dim: int = 64) -> keras.Mode
     output = layers.Dense(embedding_dim, name="user_output")(output)
 
     # L2 normalization for cosine similarity
-    output = layers.Lambda(lambda x: tf.nn.l2_normalize(x, axis=1), name="user_normalize")(output)
+    # Usar función nombrada con output_shape para compatibilidad al guardar/cargar
+    def l2_normalize_user(x):
+        return tf.nn.l2_normalize(x, axis=1)
+
+    output = layers.Lambda(l2_normalize_user, output_shape=(embedding_dim,), name="user_normalize")(
+        output
+    )
 
     return keras.Model(inputs=[role_input, numeric_input], outputs=output, name="user_tower")
 
@@ -290,7 +296,13 @@ def build_item_tower(num_artists: int, num_genres: int, embedding_dim: int = 64)
     output = layers.Dense(embedding_dim, name="item_output")(output)
 
     # L2 normalization for cosine similarity
-    output = layers.Lambda(lambda x: tf.nn.l2_normalize(x, axis=1), name="item_normalize")(output)
+    # Usar función nombrada con output_shape para compatibilidad al guardar/cargar
+    def l2_normalize_item(x):
+        return tf.nn.l2_normalize(x, axis=1)
+
+    output = layers.Lambda(l2_normalize_item, output_shape=(embedding_dim,), name="item_normalize")(
+        output
+    )
 
     return keras.Model(
         inputs=[artist_input, type_input, genres_input, numeric_input],
@@ -328,8 +340,23 @@ def build_two_tower_model(
         [item_artist_input, item_type_input, item_genres_input, item_numeric_input]
     )
 
-    # Dot product (score)
-    score = layers.Dot(axes=1, normalize=False, name="score")([user_emb, item_emb])
+    # Dot product (score) - embeddings are L2 normalized, so dot product is in [-1, 1]
+    dot_score = layers.Dot(axes=1, normalize=False, name="dot_score")([user_emb, item_emb])
+
+    # Expand dimensions for Dense layer: (batch_size,) -> (batch_size, 1)
+    dot_score_expanded = layers.Reshape((1,), name="dot_score_reshape")(dot_score)
+
+    # Map dot product [-1, 1] to rating range using a learned transformation
+    # Add bias and scale to learn the mapping from similarity to rating
+    score_dense = layers.Dense(1, activation=None, use_bias=True, name="score_dense")(
+        dot_score_expanded
+    )
+
+    # Flatten back to (batch_size,) by squeezing the last dimension
+    def squeeze_score(x):
+        return tf.squeeze(x, axis=-1)
+
+    score = layers.Lambda(squeeze_score, output_shape=(1,), name="score")(score_dense)
 
     combined_model = keras.Model(
         inputs=[
@@ -937,6 +964,59 @@ def build_embeddings(
         embedding_dim,
         model_version="1.0",
     )
+
+    # Save model for later use in generating new user embeddings
+    models_dir = Path(__file__).resolve().parents[1] / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # Determine model filename based on database
+    # Try to get database path from connection
+    try:
+        db_info = connection.execute("PRAGMA database_list").fetchone()
+        if db_info and len(db_info) > 2:
+            db_path = Path(db_info[2])
+        else:
+            # Fallback: use database parameter or default
+            db_path = resolve_database_path(None)
+    except Exception:
+        # Fallback: use default database path
+        db_path = resolve_database_path(None)
+
+    db_name = db_path.stem  # e.g., "sputnik" or "sputnik_lite"
+    model_path = models_dir / f"user_tower_{db_name}.keras"
+    metadata_path = models_dir / f"user_tower_{db_name}_metadata.json"
+
+    LOGGER.info("Saving user tower model to %s", model_path)
+    # Guardar con formato SavedModel para mejor compatibilidad con Lambda layers
+    try:
+        user_tower.save(str(model_path), save_format="keras")
+    except Exception as e:
+        LOGGER.warning("Error guardando con formato keras, intentando SavedModel: %s", e)
+        # Fallback: guardar como SavedModel
+        saved_model_path = models_dir / f"user_tower_{db_name}_savedmodel"
+        user_tower.save(str(saved_model_path), save_format="tf")
+        # También guardar como keras para compatibilidad
+        import shutil
+
+        shutil.copy(str(saved_model_path / "saved_model.pb"), str(model_path))
+
+    # Save metadata needed to use the model
+    # Note: database path is stored for reference only, not used for loading
+    metadata = {
+        "embedding_dim": embedding_dim,
+        "num_roles": num_roles,
+        "num_artists": num_artists,
+        "num_genres": num_genres,
+        "model_version": "1.0",
+        "database_name": db_name,  # Use name instead of full path for portability
+        "database_path": str(db_path),  # Kept for reference/debugging
+        "saved_at": datetime.utcnow().isoformat(),
+    }
+
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    LOGGER.info("Model and metadata saved successfully")
 
     LOGGER.info("Total time: %.2fs", perf_counter() - total_start)
 
