@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import multiprocessing
 import random
 import sqlite3
 from collections import defaultdict
@@ -232,6 +233,7 @@ def evaluate_user(
     holdout_ratio: float,
     k: int,
     pool_size: int,
+    max_ratings_count: int,
 ) -> dict:
     train, holdout = split_interactions(connection, user_id, holdout_ratio)
     if not holdout:
@@ -265,12 +267,7 @@ def evaluate_user(
         connection, unique_release_ids
     )
 
-    # Obtener max_ratings_count para novelty
-    max_ratings_count_row = connection.execute(
-        "SELECT MAX(ratings_count) as max_count FROM releases"
-    ).fetchone()
-    max_ratings_count = int(max_ratings_count_row["max_count"] or 1)
-
+    # max_ratings_count ahora se pasa como parámetro (calculado una sola vez)
     relevance_set = set(holdout)
 
     def calculate_metrics(recommended: List[int], prefix: str) -> dict:
@@ -319,6 +316,68 @@ def evaluate_user(
     return result
 
 
+def _evaluate_user_chunk(args: tuple) -> List[dict]:
+    """Evaluar un chunk de usuarios en un proceso separado."""
+    (
+        database_path_str,
+        user_ids,
+        holdout_ratio,
+        k,
+        pool_size,
+        max_ratings_count,
+        chunk_id,
+        verbose,
+    ) = args
+
+    # Configurar logging en el proceso hijo (necesario para multiprocessing)
+    configure_logging(verbose)
+
+    database_path = Path(database_path_str)
+    results = []
+
+    # Cada proceso tiene su propia conexión
+    with sqlite3.connect(database_path) as connection:
+        # Optimización: Habilitar WAL mode para mejor rendimiento
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        connection.row_factory = sqlite3.Row
+
+        total_users = len(user_ids)
+        LOGGER.info("Chunk %d: Starting evaluation of %d users", chunk_id, total_users)
+
+        for idx, user_id in enumerate(user_ids, 1):
+            try:
+                result = evaluate_user(
+                    connection, user_id, holdout_ratio, k, pool_size, max_ratings_count
+                )
+                if result:
+                    results.append(result)
+
+                # Logging progreso cada 100 usuarios o si verbose
+                if verbose or idx % 100 == 0:
+                    LOGGER.info(
+                        "Chunk %d: [%d/%d] %s -> NDCG hybrid=%.4f advanced=%.4f",
+                        chunk_id,
+                        idx,
+                        total_users,
+                        user_id,
+                        result.get("hybrid_ndcg", 0.0) if result else 0.0,
+                        result.get("advanced_ndcg", 0.0) if result else 0.0,
+                    )
+            except Exception as e:
+                LOGGER.warning("Error evaluating user %s in chunk %d: %s", user_id, chunk_id, e)
+                continue
+
+    LOGGER.info(
+        "Chunk %d completed: %d/%d users processed successfully",
+        chunk_id,
+        len(results),
+        len(user_ids),
+    )
+    return results
+
+
 def evaluate(
     database_path: Path,
     min_ratings: int,
@@ -328,34 +387,107 @@ def evaluate(
     pool_size: int,
     output: Path | None,
     verbose: bool,
+    num_workers: int | None = None,
 ) -> None:
     configure_logging(verbose)
     LOGGER.info("Evaluating recommenders (k=%d)", k)
 
+    # Determinar número de workers
+    if num_workers is None:
+        num_workers = max(1, multiprocessing.cpu_count() - 1)  # Dejar 1 core libre
+    LOGGER.info("Using %d worker processes", num_workers)
+
     with sqlite3.connect(database_path) as connection:
+        # Optimización: Habilitar WAL mode para mejor rendimiento
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
         connection.row_factory = sqlite3.Row
+
+        # Optimización: Calcular max_ratings_count UNA SOLA VEZ antes del loop
+        max_ratings_count_row = connection.execute(
+            "SELECT MAX(ratings_count) as max_count FROM releases"
+        ).fetchone()
+        max_ratings_count = int(max_ratings_count_row["max_count"] or 1)
+        LOGGER.info("Max ratings_count for novelty calculation: %d", max_ratings_count)
+
         users = pick_users(connection, min_ratings, sample_size)
         LOGGER.info("Selected %d users", len(users))
 
-        results = []
-        for user_id in users:
-            result = evaluate_user(connection, user_id, holdout_ratio, k, pool_size)
-            if not result:
-                continue
-            results.append(result)
+        if not users:
+            LOGGER.warning("No users selected")
+            return
+
+    # Dividir usuarios en chunks para procesamiento paralelo
+    # Distribuir equitativamente: dividir el resto entre los primeros chunks
+    base_size = len(users) // num_workers
+    remainder = len(users) % num_workers
+    user_chunks = []
+    start_idx = 0
+    for i in range(num_workers):
+        chunk_size = base_size + (1 if i < remainder else 0)
+        end_idx = start_idx + chunk_size
+        user_chunks.append(users[start_idx:end_idx])
+        start_idx = end_idx
+
+    LOGGER.info(
+        "Divided %d users into %d chunks (sizes: %s)",
+        len(users),
+        len(user_chunks),
+        [len(chunk) for chunk in user_chunks],
+    )
+
+    # Preparar argumentos para cada chunk
+    chunk_args = [
+        (
+            str(database_path),
+            chunk,
+            holdout_ratio,
+            k,
+            pool_size,
+            max_ratings_count,
+            chunk_id,
+            verbose,
+        )
+        for chunk_id, chunk in enumerate(user_chunks, 1)
+    ]
+
+    # Procesar chunks en paralelo
+    results = []
+    if num_workers > 1 and len(user_chunks) > 1:
+        LOGGER.info("Processing chunks in parallel with %d workers...", num_workers)
+        LOGGER.info("Total chunks: %d, Users per chunk: ~%d", len(user_chunks), chunk_size)
+
+        # Usar imap_unordered para ver progreso en tiempo real
+        with multiprocessing.Pool(processes=num_workers) as pool:
+            completed_chunks = 0
+            chunk_results = []
+            for chunk_result in pool.imap_unordered(_evaluate_user_chunk, chunk_args):
+                completed_chunks += 1
+                chunk_results.append(chunk_result)
+                LOGGER.info(
+                    "Progress: %d/%d chunks completed (%d total results so far)",
+                    completed_chunks,
+                    len(user_chunks),
+                    sum(len(cr) for cr in chunk_results),
+                )
+
+        # Aplanar resultados
+        results = [result for chunk_result in chunk_results for result in chunk_result]
+    else:
+        # Procesamiento secuencial (fallback o si solo hay 1 worker)
+        LOGGER.info("Processing chunks sequentially...")
+        for args in chunk_args:
+            chunk_results = _evaluate_user_chunk(args)
+            results.extend(chunk_results)
+
+            # Logging progreso
             if verbose:
-                LOGGER.debug(
-                    "%s -> NDCG hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
-                    "pairs=%.4f content=%.4f | Precision hybrid=%.4f advanced=%.4f",
-                    user_id,
-                    result["hybrid_ndcg"],
-                    result["advanced_ndcg"],
-                    result["nmf_ndcg"],
-                    result["two_towers_ndcg"],
-                    result["pairs_ndcg"],
-                    result["content_ndcg"],
-                    result["hybrid_precision"],
-                    result["advanced_precision"],
+                LOGGER.info(
+                    "Processed chunk %d/%d: %d results so far",
+                    args[6],
+                    len(chunk_args),
+                    len(results),
                 )
 
     if not results:
@@ -436,6 +568,12 @@ def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pool-size", type=int, default=100, help="Size of candidate pool")
     parser.add_argument("--output", type=str, help="Output CSV file path")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel workers (default: CPU count - 1)",
+    )
     return parser.parse_args(argv)
 
 
@@ -453,6 +591,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.pool_size,
         output_path,
         args.verbose,
+        args.workers,
     )
     return 0
 
