@@ -163,6 +163,9 @@ def evaluate_user(
         build_candidate_pool(connection, user_id, holdout, pool_size)
 
         recommended_hybrid = recommender.recommend(user_id, limit=k)
+        recommended_advanced = recommender.recommend_advanced(user_id, limit=k)
+        recommended_nmf = recommender.recommend_nmf(user_id, limit=k)
+        recommended_two_towers = recommender.recommend_two_towers(user_id, limit=k)
         recommended_pairs = recommender.recommend_from_pairs(user_id, limit=k)
         recommended_content = recommender.recommend_content_based(user_id, limit=k)
         recommended_random = recommender.recommend_random(user_id, limit=k)
@@ -177,6 +180,9 @@ def evaluate_user(
     return {
         "user_id": user_id,
         "ndcg_hybrid": ndcg_for(recommended_hybrid),
+        "ndcg_advanced": ndcg_for(recommended_advanced),
+        "ndcg_nmf": ndcg_for(recommended_nmf),
+        "ndcg_two_towers": ndcg_for(recommended_two_towers),
         "ndcg_pairs": ndcg_for(recommended_pairs),
         "ndcg_content": ndcg_for(recommended_content),
         "ndcg_random": ndcg_for(recommended_random),
@@ -210,9 +216,13 @@ def evaluate(
                 continue
             results.append(result)
             LOGGER.debug(
-                "%s -> NDCG hybrid=%.4f pairs=%.4f content=%.4f",
+                "%s -> NDCG hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
+                "pairs=%.4f content=%.4f",
                 user_id,
                 result["ndcg_hybrid"],
+                result["ndcg_advanced"],
+                result["ndcg_nmf"],
+                result["ndcg_two_towers"],
                 result["ndcg_pairs"],
                 result["ndcg_content"],
             )
@@ -222,15 +232,22 @@ def evaluate(
         return
 
     avg_hybrid = sum(item["ndcg_hybrid"] for item in results) / len(results)
+    avg_advanced = sum(item["ndcg_advanced"] for item in results) / len(results)
+    avg_nmf = sum(item["ndcg_nmf"] for item in results) / len(results)
+    avg_two_towers = sum(item["ndcg_two_towers"] for item in results) / len(results)
     avg_pairs = sum(item["ndcg_pairs"] for item in results) / len(results)
     avg_content = sum(item["ndcg_content"] for item in results) / len(results)
     avg_random = sum(item["ndcg_random"] for item in results) / len(results)
     avg_popular = sum(item["ndcg_popular"] for item in results) / len(results)
 
     LOGGER.info(
-        "Average NDCG@%d hybrid=%.4f pairs=%.4f content=%.4f random=%.4f popular=%.4f",
+        "Average NDCG@%d hybrid=%.4f advanced=%.4f nmf=%.4f two_towers=%.4f "
+        "pairs=%.4f content=%.4f random=%.4f popular=%.4f",
         k,
         avg_hybrid,
+        avg_advanced,
+        avg_nmf,
+        avg_two_towers,
         avg_pairs,
         avg_content,
         avg_random,

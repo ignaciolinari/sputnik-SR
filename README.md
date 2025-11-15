@@ -267,14 +267,14 @@ pre-commit run --all-files
 
 - Página principal: evalúa las señales del usuario y elige entre múltiples estrategias según el historial:
   - **Co-ocurrencia** (`release_pairs`) para usuarios con ≤8 calificaciones positivas.
-  - **Two Towers (Deep Learning)** para usuarios con 10-19 calificaciones positivas (requiere embeddings precomputados).
-  - **Factorización matricial (NMF)** para usuarios con ≥20 calificaciones positivas (requiere embeddings precomputados).
-  - **Perfiles de contenido** (géneros y artistas) como fallback cuando Two Towers o NMF no están disponibles.
+  - **Recomendaciones avanzadas** para usuarios con ≥20 calificaciones positivas (requiere embeddings precomputados):
+    - **Nivel 1 (20-29 calificaciones)**: Usa solo NMF
+    - **Nivel 2 (≥30 calificaciones)**: Combina NMF + Two Towers con pesos y bonus de consenso
+  - **Perfiles de contenido** (géneros y artistas) como fallback cuando las recomendaciones avanzadas no están disponibles.
   - **Popularidad** como fallback inicial.
   - Si aún quedan slots vacíos, mezcla candidatos populares y aleatorios para diversificar.
 - Página de contexto: ensambla candidatos combinando `release_recommendations`, vecinos por `release_pairs`, otros lanzamientos del artista y populares no vistos.
-- Los usuarios con ≥10 calificaciones positivas pueden generar o actualizar su embedding Two Towers desde la interfaz web usando el botón "Generar Two Towers" o "Actualizar Two Towers".
-- Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding NMF desde la interfaz web usando el botón "Generar NMF" o "Actualizar NMF".
+- Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"**. El sistema detecta automáticamente el nivel y actualiza los sistemas correspondientes (NMF en nivel 1, NMF + Two Towers en nivel 2).
 - Todas las interacciones se persisten en `interactions` con `rating` en [0, 5] y `rating_date = now()`.
 
 ## Sistema de recomendación híbrido
@@ -282,20 +282,20 @@ pre-commit run --all-files
 - Lógica central en `app/recommender.py` con configuración agrupada en la clase `Config`.
 - Estrategias implementadas:
   - `recommend_from_pairs`: mezcla señales de co-ocurrencia ponderando rating y recencia.
-  - `recommend_two_towers`: aprendizaje profundo usando embeddings precomputados (Two Towers).
+  - `recommend_advanced`: sistema unificado que combina NMF y Two Towers según el nivel del usuario.
   - `recommend_content_based`: perfiles de usuario por géneros y artistas con prior de popularidad.
   - `recommend_nmf`: factorización matricial usando embeddings precomputados (NMF).
+  - `recommend_two_towers`: aprendizaje profundo usando embeddings precomputados (Two Towers).
   - `recommend_random`: muestreo uniforme de lanzamientos no vistos para exploración controlada.
 - Lógica híbrida en `recommend`:
   - Usuarios sin ratings → populares + aleatorios.
   - Hasta 8 ratings positivos → co-ocurrencia.
-  - 10-19 ratings positivos → Two Towers (con fallback a contenido si embeddings no disponibles).
-  - 20+ ratings positivos → NMF (con fallback a Two Towers, luego contenido si embeddings no disponibles).
+  - 9 ratings positivos → contenido.
+  - 20+ ratings positivos → recomendaciones avanzadas (NMF en nivel 1, NMF + Two Towers en nivel 2).
   - Diversificación por artista para evitar repeticiones.
 - `recommend_context` sigue la misma filosofía: recomendaciones directas, pares, artista y fallback popular.
 - La app muestra explicaciones en la UI y expone `last_strategy` / `last_context_strategy` para instrumentación.
-- Los usuarios con ≥10 calificaciones positivas pueden actualizar su embedding Two Towers desde la interfaz web.
-- Los usuarios con ≥20 calificaciones positivas pueden actualizar su embedding NMF desde la interfaz web.
+- Los usuarios con ≥20 calificaciones positivas pueden actualizar sus embeddings desde la interfaz web usando el botón unificado "Recomendaciones avanzadas".
 
 ### Rebuilding de co-ocurrencias
 
@@ -311,10 +311,14 @@ pre-commit run --all-files
 
 - Ajusta el umbral de rating y el mínimo de pares según el tamaño de la base.
 
-### Construcción de embeddings NMF
+### Construcción de embeddings para Recomendaciones Avanzadas
+
+El sistema de recomendaciones avanzadas requiere embeddings de NMF y Two Towers. Los usuarios pueden actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"**, que detecta automáticamente el nivel y actualiza los sistemas correspondientes.
+
+#### Embeddings NMF (Nivel 1)
 
 - Tablas `user_embeddings` y `release_embeddings` almacenan vectores de factores latentes.
-- Script `offline_recommender/build_nmf_embeddings.py` construye embeddings de releases (requerido para usar NMF):
+- Script `offline_recommender/build_nmf_embeddings.py` construye embeddings de releases:
 
     ```bash
     python offline_recommender/build_nmf_embeddings.py \
@@ -324,13 +328,10 @@ pre-commit run --all-files
         --min-release-ratings 5
     ```
 
-- Los usuarios pueden actualizar sus embeddings individuales desde la interfaz web (botón "Generar NMF" o "Actualizar NMF").
-- Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema.
-
-### Construcción de embeddings Two Towers
+#### Embeddings Two Towers (Nivel 2)
 
 - Tablas `user_embeddings_dl` y `release_embeddings_dl` almacenan vectores de aprendizaje profundo.
-- Script `offline_recommender/build_two_towers.py` entrena el modelo y construye embeddings (requerido para usar Two Towers):
+- Script `offline_recommender/build_two_towers.py` entrena el modelo y construye embeddings:
 
     ```bash
     python offline_recommender/build_two_towers.py \
@@ -342,16 +343,18 @@ pre-commit run --all-files
         --min-release-ratings 3
     ```
 
-- Los usuarios pueden actualizar sus embeddings individuales desde la interfaz web (botón "Generar Two Towers" o "Actualizar Two Towers").
-- El modelo y los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema (típicamente semanal, tiempo estimado: 3-6 horas para datasets grandes).
+**Nota**: Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema (típicamente semanal). Los usuarios pueden actualizar sus embeddings individuales en cualquier momento desde la interfaz web.
 
 ### Configuración rápida de hiperparámetros
 
 - La clase `Config` permite modificar sin tocar la lógica:
   - `positive_rating_threshold`: rating mínimo para considerar "señal positiva" (default: 3.0).
   - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares (default: 8).
-  - `min_two_towers_signals`: mínimo de ratings positivos para activar Two Towers (default: 10).
-  - `min_nmf_signals`: mínimo de ratings positivos para activar NMF (default: 20).
+  - `min_advanced_level_1_signals`: mínimo de ratings positivos para activar recomendaciones avanzadas nivel 1 (default: 20).
+  - `min_advanced_level_2_signals`: mínimo de ratings positivos para activar recomendaciones avanzadas nivel 2 (default: 30).
+  - `advanced_nmf_weight`: peso de NMF en combinación nivel 2 (default: 0.6).
+  - `advanced_two_towers_weight`: peso de Two Towers en combinación nivel 2 (default: 0.4).
+  - `advanced_consensus_bonus`: bonus para candidatos que aparecen en ambos sistemas (default: 0.2).
   - `genre_weight` / `artist_weight` / `popularity_prior`: balance de cada componente en el score content-based.
   - `recency_log_base`: logaritmo usado para atenuar la recencia.
   - `candidate_pool_multiplier`: expande la búsqueda de candidatos en contenido.
@@ -376,13 +379,15 @@ Modificá estos valores al inicio del módulo para experimentar sin reescribir f
     ```
 
 - **Salida**
-  - Promedio de NDCG@k por estrategia (híbrido, pares, contenido, aleatorio, popularidad).
+  - Promedio de NDCG@k por estrategia (híbrido, recomendaciones avanzadas, pares, contenido, aleatorio, popularidad).
   - Con `--verbose`, loggea por consola el NDCG de cada usuario evaluado.
   - El CSV indicado en `--output` contiene una fila por usuario y puede analizarse luego en pandas o planillas; se recomienda guardarlo en `offline_recommender/output/`.
 - Reporta métricas promedio para:
   - Híbrido (`recommend`)
+  - Recomendaciones avanzadas (`recommend_advanced`)
   - Co-ocurrencia (`recommend_from_pairs`)
   - NMF (`recommend_nmf`)
+  - Two Towers (`recommend_two_towers`)
   - Contenido (`recommend_content_based`)
   - Aleatorio (`recommend_random`)
   - Popularidad (`_popular_unseen_releases`)

@@ -31,6 +31,17 @@ class Config:
     max_pairs_signals: int = 8
     min_nmf_signals: int = 20  # Minimum positive ratings to use NMF
     min_two_towers_signals: int = 10  # Minimum positive ratings to use Two Towers
+    min_advanced_level_1_signals: int = (
+        20  # Minimum positive ratings for advanced recommendations level 1 (NMF)
+    )
+    min_advanced_level_2_signals: int = (
+        30  # Minimum positive ratings for advanced recommendations level 2 (NMF + Two Towers)
+    )
+    advanced_nmf_weight: float = 0.6  # Weight for NMF in combined advanced recommendations
+    advanced_two_towers_weight: float = (
+        0.4  # Weight for Two Towers in combined advanced recommendations
+    )
+    advanced_consensus_bonus: float = 0.2  # Bonus for candidates appearing in both systems
     genre_weight: float = 1.0
     artist_weight: float = 0.8
     popularity_prior: float = 0.3
@@ -343,9 +354,16 @@ def _build_reduction_summary(
     }
 
 
-def _resolve_database_path() -> Path:
-    """Resolver la ruta de la base SQLite de Sputnik respetando la variable SPUTNIK_DB."""
-    request_variant = _REQUEST_VARIANT.get()
+def _resolve_database_path(request_variant_override: str | None = None) -> Path:
+    """Resolver la ruta de la base SQLite de Sputnik respetando la variable SPUTNIK_DB.
+
+    Args:
+        request_variant_override: Si se proporciona, usa esta variante en lugar de
+            leer del ContextVar.
+    """
+    request_variant = (
+        request_variant_override if request_variant_override is not None else _REQUEST_VARIANT.get()
+    )
     if request_variant:
         request_candidate = _variant_path_from_hint(request_variant)
         if request_candidate and request_candidate.exists():
@@ -1141,37 +1159,23 @@ def recommend(user_id: str, limit: int = 9) -> List[int]:
         if candidates:
             explanations.append("Basado en discos que calificaste positivamente")
         _cache_last_strategy(user_id, "pairs")
-    elif len(positive_interactions) >= Config.min_nmf_signals:
-        # Try NMF first for users with sufficient history
-        nmf_candidates = recommend_nmf(user_id, limit=limit)
-        if nmf_candidates:
-            candidates = nmf_candidates
-            explanations.append("Basado en patrones latentes de tus preferencias")
-            _cache_last_strategy(user_id, "nmf")
+    elif len(positive_interactions) >= Config.min_advanced_level_1_signals:
+        # Try advanced recommendations (NMF or NMF + Two Towers depending on level)
+        advanced_candidates = recommend_advanced(user_id, limit=limit)
+        if advanced_candidates:
+            level, _, _ = get_advanced_recommendations_level(user_id)
+            # Verificar si realmente tiene el embedding de Two Towers antes de
+            # mostrar mensaje nivel 2
+            has_two_towers = user_has_two_towers_embedding(user_id) if level == 2 else False
+            if level == 1 or (level == 2 and not has_two_towers):
+                explanations.append("Basado en patrones latentes de tus preferencias")
+                _cache_last_strategy(user_id, "advanced_level_1")
+            else:  # level == 2 and has_two_towers
+                explanations.append("Basado en aprendizaje profundo combinado de tus preferencias")
+                _cache_last_strategy(user_id, "advanced_level_2")
+            candidates = advanced_candidates
         else:
-            # Try Two Towers as fallback if NMF not available
-            two_towers_candidates = recommend_two_towers(user_id, limit=limit)
-            if two_towers_candidates:
-                candidates = two_towers_candidates
-                explanations.append("Basado en aprendizaje profundo de tus preferencias")
-                _cache_last_strategy(user_id, "two_towers")
-            else:
-                # Fallback to content-based if neither NMF nor Two Towers available
-                candidates = recommend_content_based(
-                    user_id, limit=limit, interactions=interactions
-                )
-                if candidates:
-                    explanations.append("Basado en tus géneros y artistas con mejor puntaje")
-                _cache_last_strategy(user_id, "content")
-    elif len(positive_interactions) >= Config.min_two_towers_signals:
-        # Try Two Towers for users with moderate history
-        two_towers_candidates = recommend_two_towers(user_id, limit=limit)
-        if two_towers_candidates:
-            candidates = two_towers_candidates
-            explanations.append("Basado en aprendizaje profundo de tus preferencias")
-            _cache_last_strategy(user_id, "two_towers")
-        else:
-            # Fallback to content-based if Two Towers not available
+            # Fallback to content-based if advanced recommendations not available
             candidates = recommend_content_based(user_id, limit=limit, interactions=interactions)
             if candidates:
                 explanations.append("Basado en tus géneros y artistas con mejor puntaje")
@@ -1509,6 +1513,111 @@ def user_has_two_towers_embedding(user_id: str) -> bool:
         return True
     except (json.JSONDecodeError, ValueError, KeyError, TypeError):
         return False
+
+
+def get_advanced_recommendations_level(user_id: str) -> tuple[int, int, int]:
+    """Obtener el nivel de recomendaciones avanzadas del usuario.
+
+    Returns:
+        Tuple de (level, current_signals, next_level_signals)
+        - level: 0 (no disponible), 1 (NMF), 2 (NMF + Two Towers)
+        - current_signals: cantidad de señales positivas actuales
+        - next_level_signals: señales necesarias para el siguiente nivel (0 si ya está en máximo)
+    """
+    positive_count = _count_positive_interactions(user_id, Config.positive_rating_threshold)
+
+    if positive_count < Config.min_advanced_level_1_signals:
+        return (0, positive_count, Config.min_advanced_level_1_signals)
+    elif positive_count < Config.min_advanced_level_2_signals:
+        return (1, positive_count, Config.min_advanced_level_2_signals)
+    else:
+        return (2, positive_count, 0)
+
+
+def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
+    """Recomendar usando sistema avanzado combinado (NMF + Two Towers).
+
+    Esta función combina recomendaciones de NMF y Two Towers cuando ambos están disponibles.
+    Para nivel 1 solo usa NMF, para nivel 2 combina ambos sistemas.
+
+    Returns empty list if embeddings are not available or user has insufficient history.
+    """
+    level, _, _ = get_advanced_recommendations_level(user_id)
+
+    if level == 0:
+        return []
+
+    # Nivel 1: Solo NMF
+    if level == 1:
+        nmf_candidates = recommend_nmf(
+            user_id, limit=limit * 2
+        )  # Obtener más candidatos para mejor calidad
+        if nmf_candidates:
+            return nmf_candidates[:limit]
+        return []
+
+    # Nivel 2: Combinar NMF + Two Towers
+    nmf_candidates = recommend_nmf(user_id, limit=limit * 3)
+    two_towers_candidates = recommend_two_towers(user_id, limit=limit * 3)
+
+    # Si solo uno está disponible, usar ese
+    if nmf_candidates and not two_towers_candidates:
+        return nmf_candidates[:limit]
+    if two_towers_candidates and not nmf_candidates:
+        return two_towers_candidates[:limit]
+
+    # Si ninguno está disponible, retornar vacío
+    if not nmf_candidates and not two_towers_candidates:
+        return []
+
+    # Combinar ambos sistemas
+    # Crear diccionarios de posición para normalizar scores
+    nmf_scores: Dict[int, float] = {}
+    two_towers_scores: Dict[int, float] = {}
+
+    # Asignar scores basados en posición (mejor posición = mejor score)
+    # Normalizar a [0, 1] donde 1.0 es el mejor candidato
+    if nmf_candidates:
+        nmf_max_idx = len(nmf_candidates) - 1
+        for idx, release_id in enumerate(nmf_candidates):
+            # Score normalizado: 1.0 para el primero, decrece linealmente hasta
+            # casi 0 para el último
+            if nmf_max_idx > 0:
+                nmf_scores[release_id] = 1.0 - (idx / nmf_max_idx)
+            else:
+                nmf_scores[release_id] = 1.0  # Solo un candidato
+
+    if two_towers_candidates:
+        tt_max_idx = len(two_towers_candidates) - 1
+        for idx, release_id in enumerate(two_towers_candidates):
+            if tt_max_idx > 0:
+                two_towers_scores[release_id] = 1.0 - (idx / tt_max_idx)
+            else:
+                two_towers_scores[release_id] = 1.0  # Solo un candidato
+
+    # Combinar scores
+    combined_scores: Dict[int, float] = {}
+    all_candidates = set(nmf_candidates) | set(two_towers_candidates)
+
+    for release_id in all_candidates:
+        nmf_score = nmf_scores.get(release_id, 0.0)
+        two_towers_score = two_towers_scores.get(release_id, 0.0)
+
+        # Score combinado con pesos
+        combined_score = (
+            Config.advanced_nmf_weight * nmf_score
+            + Config.advanced_two_towers_weight * two_towers_score
+        )
+
+        # Bonus si aparece en ambos sistemas (consenso)
+        if release_id in nmf_candidates and release_id in two_towers_candidates:
+            combined_score += Config.advanced_consensus_bonus
+
+        combined_scores[release_id] = combined_score
+
+    # Ordenar por score combinado y retornar top-k
+    ranked = sorted(combined_scores.items(), key=lambda item: item[1], reverse=True)
+    return [release_id for release_id, _ in ranked[:limit]]
 
 
 def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int]:
@@ -1926,15 +2035,10 @@ def count_catalog(
     return int(total)
 
 
-@functools.lru_cache(maxsize=1)
-def current_database_info() -> dict:
-    """Informar la base de datos actual y su variante (lite o completa).
-
-    Cacheado porque la información de la base de datos no cambia frecuentemente.
-    El cache se invalida automáticamente cuando se reinicia el proceso.
-    """
-
-    path = _resolve_database_path()
+@functools.lru_cache(maxsize=2)
+def _current_database_info_cached(request_variant: str | None) -> dict:
+    """Versión cacheada de current_database_info que incluye la variante de request en la clave."""
+    path = _resolve_database_path(request_variant_override=request_variant)
     filename = path.name
     variant_key = "lite" if "lite" in filename.lower() else "full"
     variant_meta = _VARIANT_METADATA.get(variant_key, _VARIANT_METADATA["full"])
@@ -1971,6 +2075,17 @@ def current_database_info() -> dict:
     }
 
 
+def current_database_info() -> dict:
+    """Informar la base de datos actual y su variante (lite o completa).
+
+    Cacheado porque la información de la base de datos no cambia frecuentemente.
+    El cache se invalida automáticamente cuando se reinicia el proceso.
+    Incluye la variante de request en la clave del cache para respetar las selecciones del usuario.
+    """
+    request_variant = _REQUEST_VARIANT.get()
+    return _current_database_info_cached(request_variant)
+
+
 _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
     {
         "id": "hybrid",
@@ -1986,11 +2101,20 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         ),
     },
     {
+        "id": "advanced",
+        "name": "Recomendaciones Avanzadas (NMF + Two Towers)",
+        "description": (
+            "Sistema unificado que combina NMF y Two Towers según tu nivel. "
+            "Nivel 1 (20+ calificaciones): usa solo NMF. "
+            "Nivel 2 (30+ calificaciones): combina NMF y Two Towers con bonus de consenso."
+        ),
+    },
+    {
         "id": "nmf",
         "name": "Factorización matricial (NMF)",
         "description": (
-            "Usa patrones latentes aprendidos de tus preferencias cuando tenés "
-            "20 o más calificaciones positivas."
+            "Usa patrones latentes aprendidos de tus preferencias. "
+            "Parte del sistema avanzado nivel 1 (20+ calificaciones positivas)."
         ),
     },
     {
@@ -1999,7 +2123,7 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "description": (
             "Modelo de aprendizaje profundo que aprende embeddings de usuarios e items "
             "usando características y preferencias. "
-            "Se activa con 10 o más calificaciones positivas."
+            "Parte del sistema avanzado nivel 2 (30+ calificaciones positivas)."
         ),
     },
     {

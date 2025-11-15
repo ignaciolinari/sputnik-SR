@@ -6,13 +6,14 @@ Este documento describe todas las estrategias de recomendación implementadas en
 
 1. [Motor Híbrido](#motor-híbrido)
 2. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
-3. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
-4. [Two Towers (Deep Learning)](#two-towers-deep-learning)
-5. [Perfiles de Contenido](#perfiles-de-contenido)
-6. [Popularidad](#popularidad)
-7. [Exploración Aleatoria](#exploración-aleatoria)
-8. [Recomendaciones Contextuales](#recomendaciones-contextuales)
-9. [Métricas de Evaluación](#métricas-de-evaluación)
+3. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
+4. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
+5. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+6. [Perfiles de Contenido](#perfiles-de-contenido)
+7. [Popularidad](#popularidad)
+8. [Exploración Aleatoria](#exploración-aleatoria)
+9. [Recomendaciones Contextuales](#recomendaciones-contextuales)
+10. [Métricas de Evaluación](#métricas-de-evaluación)
 
 ---
 
@@ -38,20 +39,15 @@ El motor híbrido es la estrategia principal que combina todas las demás estrat
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
-4. **Con 10-19 calificaciones positivas:**
-   - Prioriza Two Towers (`recommend_two_towers`) si embeddings disponibles
-   - Si Two Towers no disponible, usa perfiles de contenido como fallback
+4. **Con ≥20 calificaciones positivas:**
+   - Prioriza recomendaciones avanzadas (`recommend_advanced`) si embeddings disponibles
+     - **Nivel 1 (20-29 calificaciones)**: Usa solo NMF
+     - **Nivel 2 (≥30 calificaciones)**: Combina NMF + Two Towers con pesos y bonus de consenso
+   - Si recomendaciones avanzadas no disponibles, usa perfiles de contenido como fallback
    - Si faltan candidatos, completa con popularidad
    - Si aún faltan, agrega aleatorios
 
-5. **Con ≥20 calificaciones positivas:**
-   - Prioriza factorización matricial (`recommend_nmf`) si embeddings disponibles
-   - Si NMF no disponible, intenta Two Towers como fallback
-   - Si Two Towers no disponible, usa perfiles de contenido como fallback
-   - Si faltan candidatos, completa con popularidad
-   - Si aún faltan, agrega aleatorios
-
-4. **Diversificación final:**
+5. **Diversificación final:**
    - Aplica diversificación por artista (`_diversify_by_artist`)
    - Prioriza discos de artistas diferentes
    - Evita repetir el mismo artista en las recomendaciones
@@ -170,11 +166,88 @@ Score total para X = 32.3 + 13.3 = 45.6
 
 ---
 
+## Recomendaciones Avanzadas (NMF + Two Towers)
+
+**Función:** `recommend_advanced(user_id, limit=9)`
+
+Sistema unificado que combina NMF y Two Towers según el nivel del usuario. Se activa automáticamente para usuarios con ≥20 calificaciones positivas cuando los embeddings están disponibles.
+
+### Niveles de Desbloqueo
+
+El sistema tiene dos niveles progresivos:
+
+- **Nivel 1 (≥20 calificaciones positivas)**: Activa solo NMF
+- **Nivel 2 (≥30 calificaciones positivas)**: Activa combinación de NMF + Two Towers
+
+### Lógica de Combinación (Nivel 2)
+
+Cuando ambos sistemas están disponibles en nivel 2:
+
+1. **Obtiene candidatos de ambos sistemas:**
+   - NMF: top `limit * 3` candidatos
+   - Two Towers: top `limit * 3` candidatos
+
+2. **Normaliza scores por posición:**
+   - Cada candidato recibe un score normalizado [0, 1] basado en su posición
+   - Mejor posición = score más alto (1.0 para el primero)
+
+3. **Combina scores con pesos:**
+   ```python
+   combined_score = (
+       0.6 * nmf_score +           # 60% peso para NMF
+       0.4 * two_towers_score      # 40% peso para Two Towers
+   )
+   ```
+
+4. **Aplica bonus de consenso:**
+   - Si un candidato aparece en ambos sistemas: `+0.2` al score combinado
+   - Esto prioriza recomendaciones con consenso entre sistemas
+
+5. **Ordena y retorna top-k:**
+   - Ordena por score combinado descendente
+   - Retorna los top `limit` candidatos
+
+### Fallbacks Inteligentes
+
+- Si solo NMF está disponible: usa solo NMF
+- Si solo Two Towers está disponible: usa solo Two Towers
+- Si ninguno está disponible: retorna lista vacía (fallback a content-based en el motor híbrido)
+
+### Actualización Bajo Demanda
+
+Los usuarios pueden actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"**:
+
+- **Nivel 0 (< 20 ratings)**: Botón deshabilitado, muestra progreso "15/20"
+- **Nivel 1 (20-29 ratings)**: Botón habilitado, actualiza solo NMF
+- **Nivel 2 (≥30 ratings)**: Botón habilitado, actualiza NMF + Two Towers
+
+**Endpoint:** `POST /actualizar-recomendaciones-avanzadas`
+
+El endpoint detecta automáticamente el nivel del usuario y actualiza los sistemas correspondientes.
+
+### Ventajas del Sistema Unificado
+
+- ✅ **UX simplificada**: Un solo botón en lugar de dos técnicos
+- ✅ **Progresión clara**: El usuario ve su progreso hacia el siguiente nivel
+- ✅ **Mejor calidad**: La combinación en nivel 2 aprovecha lo mejor de ambos sistemas
+- ✅ **Consenso**: El bonus de consenso prioriza recomendaciones más confiables
+- ✅ **Fallbacks robustos**: Funciona incluso si un sistema falla
+
+### Configuración
+
+- **`min_advanced_level_1_signals`**: `20` - Umbral para nivel 1 (NMF)
+- **`min_advanced_level_2_signals`**: `30` - Umbral para nivel 2 (NMF + Two Towers)
+- **`advanced_nmf_weight`**: `0.6` - Peso de NMF en combinación
+- **`advanced_two_towers_weight`**: `0.4` - Peso de Two Towers en combinación
+- **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos en ambos sistemas
+
+---
+
 ## Factorización Matricial (NMF)
 
 **Función:** `recommend_nmf(user_id, limit=9)`
 
-Sistema basado en **Non-negative Matrix Factorization (NMF)** que aprende patrones latentes de las preferencias de los usuarios. Se activa automáticamente para usuarios con ≥20 calificaciones positivas cuando los embeddings están disponibles.
+Sistema basado en **Non-negative Matrix Factorization (NMF)** que aprende patrones latentes de las preferencias de los usuarios. Se activa automáticamente como parte del sistema de **Recomendaciones Avanzadas** para usuarios con ≥20 calificaciones positivas cuando los embeddings están disponibles. En nivel 1 se usa solo NMF, y en nivel 2 se combina con Two Towers.
 
 ### Construcción de Embeddings (Offline)
 
@@ -265,7 +338,7 @@ Los embeddings pueden actualizarse de dos formas:
 
 #### 1. Actualización Bajo Demanda (Recomendado)
 
-Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón "Generar NMF" o "Actualizar NMF" junto a su nombre de usuario.
+Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"** junto a su nombre de usuario. El sistema detecta automáticamente el nivel y actualiza NMF (nivel 1) o NMF + Two Towers (nivel 2).
 
 **Ventajas:**
 - ✅ Actualización inmediata cuando el usuario califica nuevos discos
@@ -312,7 +385,7 @@ python -m offline_recommender.build_nmf_embeddings \
 
 **Función:** `recommend_two_towers(user_id, limit=9)`
 
-Sistema basado en **aprendizaje profundo** que utiliza una arquitectura Two Towers para aprender embeddings separados de usuarios e items basándose en sus características y preferencias. Se activa automáticamente para usuarios con 10-19 calificaciones positivas cuando los embeddings están disponibles, o como fallback para usuarios con ≥20 calificaciones si NMF no está disponible.
+Sistema basado en **aprendizaje profundo** que utiliza una arquitectura Two Towers para aprender embeddings separados de usuarios e items basándose en sus características y preferencias. Se activa automáticamente como parte del sistema de **Recomendaciones Avanzadas** en nivel 2 (≥30 calificaciones positivas), donde se combina con NMF para mejores recomendaciones.
 
 ### Arquitectura
 
@@ -383,21 +456,24 @@ El modelo consiste en dos redes neuronales separadas:
 
 ### Configuración Actual
 
-- **Umbral de activación:** `min_two_towers_signals = 10` (usuarios con ≥10 calificaciones positivas)
+- **Umbral de activación:** Se activa en nivel 2 de recomendaciones avanzadas (≥30 calificaciones positivas)
 - **Dimensión de embeddings:** `embedding_dim = 64` (configurable)
 - **Filtros de datos:** `min_user_ratings = 5`, `min_release_ratings = 3` (configurable)
 - **Épocas:** `epochs = 10` (configurable, con early stopping)
 - **Batch size:** `batch_size = 1024` (configurable)
 
+**Nota:** Two Towers ahora se usa principalmente en combinación con NMF en el sistema de recomendaciones avanzadas nivel 2, aprovechando las fortalezas de ambos sistemas.
+
 ### Ejemplo Práctico
 
-**Usuario con 15 calificaciones positivas:**
+**Usuario con 35 calificaciones positivas (Nivel 2):**
 
-1. Sistema híbrido detecta que tiene ≥10 calificaciones
-2. Intenta usar `recommend_two_towers()`
-3. Carga embedding del usuario (vector de 64 dimensiones)
-4. Calcula similitud con releases con embeddings disponibles
-5. Retorna top 9 recomendaciones más similares
+1. Sistema híbrido detecta que tiene ≥30 calificaciones (nivel 2)
+2. Usa `recommend_advanced()` que combina NMF + Two Towers
+3. Obtiene candidatos de ambos sistemas
+4. Combina scores con pesos (60% NMF, 40% Two Towers)
+5. Aplica bonus de consenso (+0.2) a candidatos que aparecen en ambos
+6. Retorna top 9 recomendaciones con mejor score combinado
 
 **Si embeddings no disponibles:**
 - Fallback automático a `recommend_content_based()`
@@ -454,7 +530,7 @@ Los embeddings pueden actualizarse de dos formas:
 
 #### 1. Actualización Bajo Demanda (Recomendado)
 
-Los usuarios con ≥10 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón "Generar Two Towers" o "Actualizar Two Towers" junto a su nombre de usuario.
+Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"** junto a su nombre de usuario. El sistema detecta automáticamente el nivel y actualiza los sistemas correspondientes (NMF en nivel 1, NMF + Two Towers en nivel 2).
 
 **Ventajas:**
 - ✅ Actualización inmediata cuando el usuario califica nuevos discos
@@ -506,7 +582,7 @@ python -m offline_recommender.build_two_towers \
 
 **Función:** `recommend_content_based(user_id, limit=9)`
 
-Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene 9 calificaciones positivas, o como fallback si Two Towers o NMF no están disponibles para usuarios con más calificaciones.
+Sistema que construye un perfil del usuario basado en géneros y artistas de sus discos favoritos. Se activa automáticamente cuando el usuario tiene 9 calificaciones positivas, o como fallback si las recomendaciones avanzadas no están disponibles para usuarios con más calificaciones.
 
 ### Construcción del Perfil (`_user_profile`)
 
@@ -818,8 +894,13 @@ python -m offline_recommender.evaluate_recommender \
 
 - **`positive_rating_threshold`**: `3.0` - Rating mínimo para considerar positiva una interacción
 - **`max_pairs_signals`**: `8` - Umbral para cambiar de co-ocurrencia a contenido
-- **`min_two_towers_signals`**: `10` - Umbral para activar Two Towers (usuarios con ≥10 calificaciones positivas)
-- **`min_nmf_signals`**: `20` - Umbral para activar NMF (usuarios con ≥20 calificaciones positivas)
+- **`min_advanced_level_1_signals`**: `20` - Umbral para activar recomendaciones avanzadas nivel 1 (NMF)
+- **`min_advanced_level_2_signals`**: `30` - Umbral para activar recomendaciones avanzadas nivel 2 (NMF + Two Towers)
+- **`advanced_nmf_weight`**: `0.6` - Peso de NMF en combinación nivel 2
+- **`advanced_two_towers_weight`**: `0.4` - Peso de Two Towers en combinación nivel 2
+- **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos que aparecen en ambos sistemas
+- **`min_two_towers_signals`**: `10` - Umbral legacy (mantenido para compatibilidad)
+- **`min_nmf_signals`**: `20` - Umbral legacy (mantenido para compatibilidad)
 - **`genre_weight`**: `1.0` - Peso de géneros en scoring de contenido
 - **`artist_weight`**: `0.8` - Peso de artistas en scoring de contenido
 - **`popularity_prior`**: `0.3` - Peso del factor de popularidad
@@ -837,8 +918,9 @@ python -m offline_recommender.evaluate_recommender \
 |------------|---------------|-----------------|-------------|
 | **Motor Híbrido** | Siempre (principal) | Alta | Alta |
 | **Co-ocurrencia** | ≤8 calificaciones | Media-Alta | Media |
-| **NMF** | ≥20 calificaciones | Muy Alta | Alta |
-| **Two Towers** | 10-19 calificaciones | Muy Alta | Alta |
+| **Recomendaciones Avanzadas** | ≥20 calificaciones | Muy Alta | Alta |
+| **NMF** | Nivel 1 avanzadas (20-29) | Muy Alta | Alta |
+| **Two Towers** | Nivel 2 avanzadas (≥30) | Muy Alta | Alta |
 | **Contenido** | 9 calificaciones, fallback | Alta | Media |
 | **Popularidad** | Fallback | Baja | Baja |
 | **Aleatorio** | Último fallback | Ninguna | Baja |
@@ -904,7 +986,9 @@ User-based CF sería beneficioso si:
 ## Referencias
 
 - Implementación: `app/recommender.py`
-- Actualización de embeddings bajo demanda: `app/nmf_update.py`
+- Recomendaciones avanzadas: `recommend_advanced()` - combina NMF + Two Towers
+- Actualización de embeddings bajo demanda: `app/nmf_update.py`, `app/two_towers_update.py`
+- Endpoint unificado: `POST /actualizar-recomendaciones-avanzadas` en `app/app.py`
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
 - Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
 - Construcción de embeddings Two Towers: `offline_recommender/build_two_towers.py`

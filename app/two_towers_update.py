@@ -359,7 +359,7 @@ def update_user_embedding(
     # Importar aquí para evitar dependencia circular
     from .recommender import Config
 
-    min_required = Config.min_two_towers_signals
+    min_required = Config.min_advanced_level_2_signals
     if len(rows) < min_required:
         LOGGER.warning(
             "Usuario tiene muy pocas calificaciones positivas: %d (requerido: %d)",

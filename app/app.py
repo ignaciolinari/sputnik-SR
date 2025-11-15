@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "14/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "15/11/2025")
 
 
 RATING_CHOICES = [
@@ -252,14 +252,18 @@ def recommendations():
     positive_count = recommender._count_positive_interactions(
         user_id, recommender.Config.positive_rating_threshold
     )
-    can_use_nmf = positive_count >= recommender.Config.min_nmf_signals
-    has_nmf_embedding = recommender.user_has_nmf_embedding(user_id) if can_use_nmf else False
 
-    # Verificar si el usuario puede usar Two Towers (siempre calcular para mostrar el botón)
-    can_use_two_towers = positive_count >= recommender.Config.min_two_towers_signals
-    has_two_towers_embedding = (
-        recommender.user_has_two_towers_embedding(user_id) if can_use_two_towers else False
+    # Obtener nivel de recomendaciones avanzadas
+    advanced_level, current_signals, next_level_signals = (
+        recommender.get_advanced_recommendations_level(user_id)
     )
+    has_advanced_embedding = False
+    if advanced_level >= 1:
+        has_nmf = recommender.user_has_nmf_embedding(user_id)
+        has_tt = (
+            recommender.user_has_two_towers_embedding(user_id) if advanced_level >= 2 else False
+        )
+        has_advanced_embedding = has_nmf or (advanced_level >= 2 and has_tt)
 
     genre_options = list(recommender.list_genres())
     year_options = list(recommender.list_release_years())
@@ -304,11 +308,11 @@ def recommendations():
         last_update_display=LAST_APP_UPDATE,
         database_info=recommender.current_database_info(),
         active_recommenders=recommender.active_recommendation_systems(),
-        can_use_nmf=can_use_nmf,
-        has_nmf_embedding=has_nmf_embedding,
-        can_use_two_towers=can_use_two_towers,
-        has_two_towers_embedding=has_two_towers_embedding,
         positive_ratings_count=positive_count,
+        advanced_level=advanced_level,
+        advanced_current_signals=current_signals,
+        advanced_next_level_signals=next_level_signals,
+        has_advanced_embedding=has_advanced_embedding,
     )
 
 
@@ -391,81 +395,124 @@ def reset_history():
     return redirect("/recomendaciones")
 
 
-@app.post("/actualizar-nmf")
-def update_nmf_embedding():
-    """Actualizar embedding NMF del usuario actual."""
+@app.post("/actualizar-recomendaciones-avanzadas")
+def update_advanced_recommendations():
+    """Actualizar embeddings avanzados (NMF y/o Two Towers) del usuario actual según su nivel."""
     user_id = request.cookies.get("id_usuario")
     if not user_id:
         return redirect("/")
 
-    # Verificar que el usuario tiene suficientes calificaciones
-    positive_interactions = [
-        interaction
-        for interaction in recommender._user_interactions(user_id)
-        if interaction.rating >= recommender.Config.positive_rating_threshold
-    ]
+    # Obtener nivel del usuario
+    level, current_signals, next_level_signals = recommender.get_advanced_recommendations_level(
+        user_id
+    )
 
-    if len(positive_interactions) < recommender.Config.min_nmf_signals:
+    if level == 0:
+        remaining = next_level_signals - current_signals
         return jsonify(
             {
                 "success": False,
                 "message": (
-                    f"Necesitás al menos {recommender.Config.min_nmf_signals} "
-                    "calificaciones positivas para usar NMF."
+                    f"Necesitás {remaining} calificación{'es' if remaining != 1 else ''} "
+                    f"positiva{'s' if remaining != 1 else ''} más "
+                    f"para desbloquear recomendaciones avanzadas ({next_level_signals} en total)."
                 ),
+                "level": 0,
+                "current_signals": current_signals,
+                "next_level_signals": next_level_signals,
             }
         ), 400
 
-    # Verificar que hay embeddings de releases disponibles antes de intentar actualizar
     import sqlite3
 
     from app.recommender import _connect
 
+    systems_updated = []
+    errors = []
+
     try:
-        # Usar context manager para asegurar cierre correcto
         with _connect() as connection:
             connection.row_factory = sqlite3.Row
 
-            # Verificar que hay releases con embeddings disponibles
-            release_count_row = connection.execute(
-                "SELECT COUNT(*) as count FROM release_embeddings"
-            ).fetchone()
-            release_count = (
-                int(release_count_row[0]) if release_count_row and release_count_row[0] else 0
+            # Nivel 1: Solo NMF
+            if level >= 1:
+                # Verificar que hay releases con embeddings NMF disponibles
+                nmf_release_count_row = connection.execute(
+                    "SELECT COUNT(*) as count FROM release_embeddings"
+                ).fetchone()
+                nmf_release_count = (
+                    int(nmf_release_count_row[0])
+                    if nmf_release_count_row and nmf_release_count_row[0]
+                    else 0
+                )
+
+                if nmf_release_count == 0:
+                    errors.append(
+                        "No hay embeddings NMF de releases disponibles. "
+                        "Necesitás ejecutar el script de construcción de embeddings primero."
+                    )
+                else:
+                    success_nmf = nmf_update.update_user_embedding(
+                        connection,
+                        user_id,
+                        min_rating=recommender.Config.positive_rating_threshold,
+                        n_components=50,
+                    )
+                    if success_nmf:
+                        systems_updated.append("NMF")
+                    else:
+                        errors.append("No se pudo actualizar el embedding NMF.")
+
+            # Nivel 2: También Two Towers
+            if level >= 2:
+                # Verificar que hay releases con embeddings Two Towers disponibles
+                tt_release_count_row = connection.execute(
+                    "SELECT COUNT(*) as count FROM release_embeddings_dl"
+                ).fetchone()
+                tt_release_count = (
+                    int(tt_release_count_row[0])
+                    if tt_release_count_row and tt_release_count_row[0]
+                    else 0
+                )
+
+                if tt_release_count == 0:
+                    errors.append(
+                        "No hay embeddings Two Towers de releases disponibles. "
+                        "Necesitás ejecutar el script de construcción de embeddings primero."
+                    )
+                else:
+                    success_tt = two_towers_update.update_user_embedding(
+                        connection,
+                        user_id,
+                        min_rating=recommender.Config.positive_rating_threshold,
+                        embedding_dim=64,
+                    )
+                    if success_tt:
+                        systems_updated.append("Two Towers")
+                    else:
+                        errors.append("No se pudo actualizar el embedding Two Towers.")
+
+        # Limpiar cache de recomendaciones para forzar recálculo
+        recommender._LAST_EXPLANATIONS.pop(user_id, None)
+        recommender._LAST_STRATEGY.pop(user_id, None)
+
+        if systems_updated:
+            level_name = "Nivel 1 (NMF)" if level == 1 else "Nivel 2 (NMF + Two Towers)"
+            systems_str = " y ".join(systems_updated)
+            message = (
+                f"Recomendaciones avanzadas ({level_name}) actualizadas exitosamente. "
+                f"Sistemas actualizados: {systems_str}."
             )
-
-            if release_count == 0:
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": (
-                            "No hay embeddings de releases disponibles. "
-                            "Necesitás ejecutar el script de construcción de embeddings primero."
-                        ),
-                    }
-                ), 400
-
-            # n_components se detecta automáticamente desde los embeddings existentes
-            # El valor 50 es solo un fallback si no se puede detectar
-            success = nmf_update.update_user_embedding(
-                connection,
-                user_id,
-                min_rating=recommender.Config.positive_rating_threshold,
-                n_components=50,
-            )
-
-        if success:
-            # Limpiar cache de recomendaciones para forzar recálculo
-            recommender._LAST_EXPLANATIONS.pop(user_id, None)
-            recommender._LAST_STRATEGY.pop(user_id, None)
+            if errors:
+                message += f" Advertencias: {' '.join(errors)}"
 
             return jsonify(
                 {
                     "success": True,
-                    "message": (
-                        "Embedding NMF actualizado exitosamente. "
-                        "Tus recomendaciones ahora usan patrones latentes."
-                    ),
+                    "message": message,
+                    "level": level,
+                    "systems_updated": systems_updated,
+                    "warnings": errors if errors else None,
                 }
             )
         else:
@@ -473,120 +520,22 @@ def update_nmf_embedding():
                 {
                     "success": False,
                     "message": (
-                        "No se pudo actualizar el embedding. "
-                        "Verificá que hay suficientes releases con embeddings disponibles."
+                        "No se pudieron actualizar los embeddings. " f"Errores: {' '.join(errors)}"
                     ),
+                    "level": level,
+                    "errors": errors,
                 }
             ), 500
 
     except Exception as e:
         import logging
 
-        logging.exception("Error actualizando embedding NMF")
+        logging.exception("Error actualizando recomendaciones avanzadas")
         return jsonify(
             {
                 "success": False,
-                "message": f"Error al actualizar embedding: {str(e)}",
-            }
-        ), 500
-
-
-@app.post("/actualizar-two-towers")
-def update_two_towers_embedding():
-    """Actualizar embedding Two Towers del usuario actual."""
-    user_id = request.cookies.get("id_usuario")
-    if not user_id:
-        return redirect("/")
-
-    # Verificar que el usuario tiene suficientes calificaciones
-    positive_interactions = [
-        interaction
-        for interaction in recommender._user_interactions(user_id)
-        if interaction.rating >= recommender.Config.positive_rating_threshold
-    ]
-
-    if len(positive_interactions) < recommender.Config.min_two_towers_signals:
-        return jsonify(
-            {
-                "success": False,
-                "message": (
-                    f"Necesitás al menos {recommender.Config.min_two_towers_signals} "
-                    "calificaciones positivas para usar Two Towers."
-                ),
-            }
-        ), 400
-
-    # Verificar que hay embeddings de releases disponibles antes de intentar actualizar
-    import sqlite3
-
-    from app.recommender import _connect
-
-    try:
-        # Usar context manager para asegurar cierre correcto
-        with _connect() as connection:
-            connection.row_factory = sqlite3.Row
-
-            # Verificar que hay releases con embeddings disponibles
-            release_count_row = connection.execute(
-                "SELECT COUNT(*) as count FROM release_embeddings_dl"
-            ).fetchone()
-            release_count = (
-                int(release_count_row[0]) if release_count_row and release_count_row[0] else 0
-            )
-
-            if release_count == 0:
-                return jsonify(
-                    {
-                        "success": False,
-                        "message": (
-                            "No hay embeddings de releases disponibles. "
-                            "Necesitás ejecutar el script de construcción de embeddings primero."
-                        ),
-                    }
-                ), 400
-
-            # embedding_dim se detecta automáticamente desde los embeddings existentes
-            # El valor 64 es solo un fallback si no se puede detectar
-            success = two_towers_update.update_user_embedding(
-                connection,
-                user_id,
-                min_rating=recommender.Config.positive_rating_threshold,
-                embedding_dim=64,
-            )
-
-        if success:
-            # Limpiar cache de recomendaciones para forzar recálculo
-            recommender._LAST_EXPLANATIONS.pop(user_id, None)
-            recommender._LAST_STRATEGY.pop(user_id, None)
-
-            return jsonify(
-                {
-                    "success": True,
-                    "message": (
-                        "Embedding Two Towers actualizado exitosamente. "
-                        "Tus recomendaciones ahora usan aprendizaje profundo."
-                    ),
-                }
-            )
-        else:
-            return jsonify(
-                {
-                    "success": False,
-                    "message": (
-                        "No se pudo actualizar el embedding. "
-                        "Verificá que hay suficientes releases con embeddings disponibles."
-                    ),
-                }
-            ), 500
-
-    except Exception as e:
-        import logging
-
-        logging.exception("Error actualizando embedding Two Towers")
-        return jsonify(
-            {
-                "success": False,
-                "message": f"Error al actualizar embedding: {str(e)}",
+                "message": f"Error al actualizar embeddings: {str(e)}",
+                "level": level,
             }
         ), 500
 
