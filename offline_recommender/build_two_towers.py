@@ -763,7 +763,8 @@ def save_embeddings(
             )
             continue
 
-        for user_id, embedding in zip(batch_user_ids, embeddings, strict=True):
+        # Nota: No usar strict=False aquí para compatibilidad con Python < 3.10 (PythonAnywhere)
+        for user_id, embedding in zip(batch_user_ids, embeddings):  # noqa: B905
             user_embeddings_data.append(
                 (
                     user_id,
@@ -838,7 +839,8 @@ def save_embeddings(
             )
             continue
 
-        for release_id, embedding in zip(batch_release_ids, embeddings, strict=True):
+        # Nota: No usar strict=False aquí para compatibilidad con Python < 3.10 (PythonAnywhere)
+        for release_id, embedding in zip(batch_release_ids, embeddings):  # noqa: B905
             release_embeddings_data.append(
                 (
                     release_id,

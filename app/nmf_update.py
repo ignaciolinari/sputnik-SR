@@ -160,8 +160,9 @@ def update_user_embedding(
         return False
 
     # Construir diccionario de release_id -> rating
-    # No necesitamos strict=True porque ya verificamos la longitud arriba
-    release_to_rating = {rid: rating for rid, rating in zip(release_ids, ratings, strict=False)}
+    # Ya verificamos la longitud arriba, así que zip() es seguro
+    # Nota: No usar strict=False aquí para compatibilidad con Python < 3.10 (PythonAnywhere)
+    release_to_rating = {rid: rating for rid, rating in zip(release_ids, ratings)}  # noqa: B905
 
     for row in embedding_rows:
         release_id = int(row["id_release"])

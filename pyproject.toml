@@ -28,6 +28,9 @@ ignore = ["ANN101", "ANN102"]
 "tests/*" = ["S101", "E501"]
 "scraper/http.py" = ["E501"]
 "notebooks/*.ipynb" = ["E402", "E501"]
+"app/two_towers_update.py" = ["B905"]
+"app/nmf_update.py" = ["B905"]
+"offline_recommender/build_two_towers.py" = ["B905"]
 
 [tool.ruff.format]
 quote-style = "double"
