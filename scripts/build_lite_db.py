@@ -128,14 +128,27 @@ def copy_table_data(
 
 
 def copy_essential_tables(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
-    """Copiar tablas esenciales completas."""
+    """Copiar tablas esenciales completas.
+
+    Solo copia tablas que realmente se usan en la aplicación:
+    - artists, releases, genres: catálogo básico
+    - artist_genres, release_genres: para búsqueda y filtrado
+    - release_recommendations: para recomendaciones contextuales
+    - release_pairs: se copia después de forma reducida
+
+    NO copia:
+    - artist_similars: no se usa en el código
+    - release_tracks: no se usa en el código (ocupa mucho espacio)
+    - lists, list_releases: no se usan
+    - staff_reviews: no se usa
+    - release_credits: no se usa
+    """
     essential_tables = [
         "artists",
         "releases",
         "genres",
         "artist_genres",
         "release_genres",
-        "artist_similars",
         "release_recommendations",
     ]
 
@@ -151,7 +164,7 @@ def copy_essential_tables(source: sqlite3.Connection, target: sqlite3.Connection
 def copy_release_embeddings_reduced(
     source: sqlite3.Connection,
     target: sqlite3.Connection,
-    max_releases: int = 10000,
+    max_releases: int = 8000,
 ) -> None:
     """Copiar embeddings de releases solo para los releases más populares."""
     print("\nCopiando embeddings de releases reducidos...")
@@ -821,7 +834,8 @@ def main() -> int:
         copy_essential_tables(source_conn, target_conn)
 
         # Copiar embeddings de releases reducidos (solo los más populares)
-        copy_release_embeddings_reduced(source_conn, target_conn)
+        # Reducir a 6000 para mantener tamaño bajo 90MB
+        copy_release_embeddings_reduced(source_conn, target_conn, max_releases=6000)
 
         # Copiar release_pairs reducidos (solo los más importantes)
         copy_release_pairs_reduced(source_conn, target_conn, args.max_pairs)
@@ -835,8 +849,8 @@ def main() -> int:
         # Copiar embeddings de usuarios
         copy_user_embeddings(source_conn, target_conn)
 
-        # Copiar tracklists reducidos
-        copy_release_tracks_reduced(source_conn, target_conn)
+        # NO copiar tracklists - no se usan en la aplicación y ocupan mucho espacio
+        # copy_release_tracks_reduced(source_conn, target_conn)
 
         # Validar integridad referencial antes de optimizar
         validate_integrity(target_conn)

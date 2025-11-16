@@ -1,10 +1,10 @@
 {
   "embedding_dim": 64,
   "num_roles": 10,
-  "num_artists": 3225,
+  "num_artists": 293,
   "num_genres": 97,
   "model_version": "1.0",
   "database_name": "sputnik_lite",
   "database_path": "/Users/ignacio/Repos/sputnik-SR/data/sputnik_lite.db",
-  "saved_at": "2025-11-15T06:16:13.088553"
+  "saved_at": "2025-11-16T14:30:08.644166"
 }
