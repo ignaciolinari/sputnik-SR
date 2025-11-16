@@ -8,11 +8,13 @@ import logging
 import multiprocessing
 import random
 import sqlite3
+import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 from typing import List
+from typing import Set
 
 from app import metrics
 from app import recommender
@@ -95,6 +97,44 @@ def resolve_database_path(database: str | None) -> Path:
 def configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s - %(message)s")
+
+
+def load_processed_users(output_path: Path | None) -> Set[str]:
+    """Cargar usuarios ya procesados desde el archivo CSV de salida."""
+    if not output_path or not output_path.exists():
+        return set()
+
+    processed = set()
+    try:
+        with output_path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                user_id = row.get("user_id")
+                if user_id:
+                    processed.add(user_id)
+        LOGGER.info("Found %d already processed users in %s", len(processed), output_path)
+    except Exception as e:
+        LOGGER.warning("Error reading existing results file: %s", e)
+
+    return processed
+
+
+def write_results_incremental(
+    output_path: Path,
+    results: List[dict],
+    fieldnames: List[str],
+    append: bool = False,
+) -> None:
+    """Escribir resultados incrementalmente al CSV."""
+    file_exists = output_path.exists() and append
+
+    with output_path.open("a" if file_exists else "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(results)
+
+    LOGGER.info("Wrote %d results to %s (append=%s)", len(results), output_path, append)
 
 
 def pick_users(connection: sqlite3.Connection, min_ratings: int, sample_size: int) -> List[str]:
@@ -340,34 +380,60 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        connection.execute("PRAGMA cache_size=-128000")  # 128MB cache (aumentado)
+        connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
+        connection.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+        connection.execute("PRAGMA threads=4")  # Usar múltiples threads para queries
         connection.row_factory = sqlite3.Row
 
         total_users = len(user_ids)
         LOGGER.info("Chunk %d: Starting evaluation of %d users", chunk_id, total_users)
 
         for idx, user_id in enumerate(user_ids, 1):
-            try:
-                result = evaluate_user(
-                    connection, user_id, holdout_ratio, k, pool_size, max_ratings_count
-                )
-                if result:
-                    results.append(result)
+            # Retry logic para errores de "database is locked"
+            max_retries = 3
+            retry_delay = 0.5  # segundos
 
-                # Logging progreso cada 100 usuarios o si verbose
-                if verbose or idx % 100 == 0:
-                    LOGGER.info(
-                        "Chunk %d: [%d/%d] %s -> NDCG hybrid=%.4f advanced=%.4f",
-                        chunk_id,
-                        idx,
-                        total_users,
-                        user_id,
-                        result.get("hybrid_ndcg", 0.0) if result else 0.0,
-                        result.get("advanced_ndcg", 0.0) if result else 0.0,
+            for attempt in range(max_retries):
+                try:
+                    result = evaluate_user(
+                        connection, user_id, holdout_ratio, k, pool_size, max_ratings_count
                     )
-            except Exception as e:
-                LOGGER.warning("Error evaluating user %s in chunk %d: %s", user_id, chunk_id, e)
-                continue
+                    if result:
+                        results.append(result)
+
+                    # Logging progreso cada 100 usuarios o si verbose
+                    if verbose or idx % 100 == 0:
+                        LOGGER.info(
+                            "Chunk %d: [%d/%d] %s -> NDCG hybrid=%.4f advanced=%.4f",
+                            chunk_id,
+                            idx,
+                            total_users,
+                            user_id,
+                            result.get("hybrid_ndcg", 0.0) if result else 0.0,
+                            result.get("advanced_ndcg", 0.0) if result else 0.0,
+                        )
+                    break  # Éxito, salir del loop de retry
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                        wait_time = retry_delay * (2**attempt)  # Exponential backoff
+                        LOGGER.debug(
+                            "Database locked for user %s (attempt %d/%d), retrying in %.2fs",
+                            user_id,
+                            attempt + 1,
+                            max_retries,
+                            wait_time,
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        LOGGER.warning(
+                            "Error evaluating user %s in chunk %d: %s", user_id, chunk_id, e
+                        )
+                        break
+                except Exception as e:
+                    LOGGER.warning("Error evaluating user %s in chunk %d: %s", user_id, chunk_id, e)
+                    break
 
     LOGGER.info(
         "Chunk %d completed: %d/%d users processed successfully",
@@ -401,7 +467,10 @@ def evaluate(
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        connection.execute("PRAGMA cache_size=-128000")  # 128MB cache (aumentado)
+        connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
+        connection.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+        connection.execute("PRAGMA threads=4")  # Usar múltiples threads para queries
         connection.row_factory = sqlite3.Row
 
         # Optimización: Calcular max_ratings_count UNA SOLA VEZ antes del loop
@@ -416,6 +485,22 @@ def evaluate(
 
         if not users:
             LOGGER.warning("No users selected")
+            return
+
+        # Filtrar usuarios ya procesados si hay archivo de salida existente
+        if output:
+            processed_users = load_processed_users(output)
+            if processed_users:
+                original_count = len(users)
+                users = [u for u in users if u not in processed_users]
+                LOGGER.info(
+                    "Filtered out %d already processed users, %d remaining",
+                    original_count - len(users),
+                    len(users),
+                )
+
+        if not users:
+            LOGGER.warning("All users already processed")
             return
 
     # Dividir usuarios en chunks para procesamiento paralelo
@@ -458,6 +543,17 @@ def evaluate(
         LOGGER.info("Processing chunks in parallel with %d workers...", num_workers)
         LOGGER.info("Total chunks: %d, Users per chunk: ~%d", len(user_chunks), chunk_size)
 
+        # Determinar fieldnames para escritura incremental
+        fieldnames = None
+        if output and output.exists():
+            # Leer fieldnames del archivo existente
+            try:
+                with output.open("r", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = reader.fieldnames
+            except Exception:
+                pass
+
         # Usar imap_unordered para ver progreso en tiempo real
         with multiprocessing.Pool(processes=num_workers) as pool:
             completed_chunks = 0
@@ -465,36 +561,96 @@ def evaluate(
             for chunk_result in pool.imap_unordered(_evaluate_user_chunk, chunk_args):
                 completed_chunks += 1
                 chunk_results.append(chunk_result)
+                total_results = sum(len(cr) for cr in chunk_results)
                 LOGGER.info(
                     "Progress: %d/%d chunks completed (%d total results so far)",
                     completed_chunks,
                     len(user_chunks),
-                    sum(len(cr) for cr in chunk_results),
+                    total_results,
                 )
+
+                # Escribir resultados incrementalmente después de cada chunk
+                if output and chunk_result:
+                    if fieldnames is None:
+                        fieldnames = list(chunk_result[0].keys())
+                    write_results_incremental(
+                        output,
+                        chunk_result,
+                        fieldnames,
+                        append=(completed_chunks > 1 or output.exists()),
+                    )
 
         # Aplanar resultados
         results = [result for chunk_result in chunk_results for result in chunk_result]
     else:
         # Procesamiento secuencial (fallback o si solo hay 1 worker)
         LOGGER.info("Processing chunks sequentially...")
-        for args in chunk_args:
+
+        # Determinar fieldnames para escritura incremental
+        fieldnames = None
+        if output and output.exists():
+            try:
+                with output.open("r", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    fieldnames = reader.fieldnames
+            except Exception:
+                pass
+
+        for chunk_idx, args in enumerate(chunk_args, 1):
             chunk_results = _evaluate_user_chunk(args)
             results.extend(chunk_results)
 
-            # Logging progreso
-            if verbose:
-                LOGGER.info(
-                    "Processed chunk %d/%d: %d results so far",
-                    args[6],
-                    len(chunk_args),
-                    len(results),
+            # Escribir resultados incrementalmente después de cada chunk
+            if output and chunk_results:
+                if fieldnames is None:
+                    fieldnames = list(chunk_results[0].keys())
+                write_results_incremental(
+                    output,
+                    chunk_results,
+                    fieldnames,
+                    append=(chunk_idx > 1 or output.exists()),
                 )
 
-    if not results:
+            # Logging progreso
+            LOGGER.info(
+                "Processed chunk %d/%d: %d results so far",
+                args[6],
+                len(chunk_args),
+                len(results),
+            )
+
+    # Si hay archivo de salida existente, cargar todos los resultados
+    # para calcular promedios completos
+    all_results = results.copy()
+    if output and output.exists() and results:
+        try:
+            with output.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                existing_results = list(reader)
+                # Convertir strings a números donde corresponda
+                for row in existing_results:
+                    for key, value in row.items():
+                        if key != "user_id" and value:
+                            try:
+                                row[key] = float(value)
+                            except (ValueError, TypeError):
+                                pass
+                all_results.extend(existing_results)
+                LOGGER.info(
+                    "Loaded %d existing results + %d new results = %d total for averages",
+                    len(existing_results),
+                    len(results),
+                    len(all_results),
+                )
+        except Exception as e:
+            LOGGER.warning("Error loading existing results for averages: %s", e)
+            all_results = results
+
+    if not all_results:
         LOGGER.warning("No results collected; check filters")
         return
 
-    # Calcular promedios para todas las métricas
+    # Calcular promedios para todas las métricas usando todos los resultados
     strategies = [
         "hybrid",
         "advanced",
@@ -520,8 +676,16 @@ def evaluate(
     for strategy in strategies:
         for metric in metric_names:
             key = f"{strategy}_{metric}"
-            if key in results[0]:
-                averages[key] = sum(item[key] for item in results) / len(results)
+            if key in all_results[0]:
+                values = [
+                    item.get(key, 0.0)
+                    for item in all_results
+                    if isinstance(item.get(key), (int, float))
+                ]
+                if values:
+                    averages[key] = sum(values) / len(values)
+                else:
+                    averages[key] = 0.0
 
     # Mostrar resumen de métricas principales
     LOGGER.info("=" * 80)
@@ -545,13 +709,16 @@ def evaluate(
 
     LOGGER.info("=" * 80)
 
+    # Los resultados ya fueron escritos incrementalmente, solo loguear
     if output:
-        fieldnames = list(results[0].keys())
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-        LOGGER.info("Saved detailed results to %s", output)
+        if results:
+            LOGGER.info(
+                "Results already written incrementally to %s (%d total users)",
+                output,
+                len(results),
+            )
+        else:
+            LOGGER.warning("No results to save")
 
 
 def parse_arguments(argv: Iterable[str] | None = None) -> argparse.Namespace:

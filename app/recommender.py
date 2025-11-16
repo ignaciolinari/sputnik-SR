@@ -398,8 +398,10 @@ def _connect() -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON;")
     connection.execute("PRAGMA journal_mode = WAL;")  # Write-Ahead Logging para mejor concurrencia
     connection.execute("PRAGMA synchronous = NORMAL;")  # Balance entre seguridad y rendimiento
-    connection.execute("PRAGMA cache_size = -64000;")  # 64MB cache (negativo = KB)
+    connection.execute("PRAGMA cache_size = -128000;")  # 128MB cache (aumentado)
     connection.execute("PRAGMA temp_store = MEMORY;")  # Usar memoria para temp tables
+    connection.execute("PRAGMA mmap_size = 268435456;")  # 256MB memory-mapped I/O
+    connection.execute("PRAGMA threads = 4;")  # Usar múltiples threads para queries
     return connection
 
 
@@ -1330,12 +1332,16 @@ def recommend_nmf(user_id: str, limit: int = 9) -> List[int]:
                 list(seen_ids),
             )
         else:
-            # Load all and filter in Python for very large or empty seen sets
+            # Load limited set and filter in Python for very large or empty seen sets
+            # Limit to top candidates to reduce I/O (load more than needed for better results)
+            MAX_EMBEDDINGS_TO_LOAD = 10000  # Load top 10k instead of all
             release_rows = _select(
                 """
                 SELECT id_release, embedding_json
-                FROM release_embeddings;
+                FROM release_embeddings
+                LIMIT ?;
                 """,
+                [MAX_EMBEDDINGS_TO_LOAD],
             )
 
         if not release_rows:
@@ -1429,12 +1435,16 @@ def recommend_two_towers(user_id: str, limit: int = 9) -> List[int]:
                 list(seen_ids),
             )
         else:
-            # Load all and filter in Python for very large or empty seen sets
+            # Load limited set and filter in Python for very large or empty seen sets
+            # Limit to top candidates to reduce I/O (load more than needed for better results)
+            MAX_EMBEDDINGS_TO_LOAD = 10000  # Load top 10k instead of all
             release_rows = _select(
                 """
                 SELECT id_release, embedding_json
-                FROM release_embeddings_dl;
+                FROM release_embeddings_dl
+                LIMIT ?;
                 """,
+                [MAX_EMBEDDINGS_TO_LOAD],
             )
 
         if not release_rows:

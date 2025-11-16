@@ -308,3 +308,19 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 -- Additional useful indexes
 CREATE INDEX IF NOT EXISTS idx_releases_release_year ON releases(release_year);
 CREATE INDEX IF NOT EXISTS idx_interactions_user_rating ON interactions(id_user, rating);
+
+-- Optimized composite indexes for evaluation queries
+CREATE INDEX IF NOT EXISTS idx_interactions_user_rating_date
+  ON interactions(id_user, rating, rating_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_release_genres_release_genre
+  ON release_genres(id_release, id_genre);
+
+CREATE INDEX IF NOT EXISTS idx_releases_artist_ratings
+  ON releases(artist_id, ratings_count DESC, avg_rating DESC);
+
+CREATE INDEX IF NOT EXISTS idx_artist_genres_artist_genre
+  ON artist_genres(id_artist, id_genre);
+
+CREATE INDEX IF NOT EXISTS idx_release_pairs_r1_r2_count
+  ON release_pairs(id_release_1, pair_count DESC);
