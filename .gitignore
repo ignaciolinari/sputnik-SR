@@ -16,3 +16,6 @@ tmp/
 output/
 notes.md
 vintage/
+*.lock
+.evaluate_recommender.lock
+.experiment_two_towers.lock

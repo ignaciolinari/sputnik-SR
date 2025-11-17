@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import logging
 import multiprocessing
+import os
 import random
 import sqlite3
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
@@ -21,6 +25,76 @@ from app import recommender
 
 
 LOGGER = logging.getLogger("evaluate_recommender")
+
+
+@contextmanager
+def _process_lock(lock_file_path: Path):
+    """Context manager para prevenir ejecuciones simultáneas del mismo script.
+
+    Crea un archivo de lock con el PID del proceso. Si el archivo existe y el proceso
+    sigue activo, lanza una excepción. El lock se elimina automáticamente al salir.
+    """
+    lock_file = lock_file_path
+
+    # Verificar si ya existe un lock file
+    if lock_file.exists():
+        try:
+            # Leer el PID del archivo
+            with lock_file.open("r") as f:
+                stored_pid = int(f.read().strip())
+
+            # Verificar si el proceso sigue activo
+            try:
+                # En Unix, enviar señal 0 no hace nada pero verifica si el proceso existe
+                os.kill(stored_pid, 0)
+                # Si llegamos aquí, el proceso existe
+                raise RuntimeError(
+                    f"Another instance of evaluate_recommender is already running "
+                    f"(PID: {stored_pid}). Lock file: {lock_file}. "
+                    "Please wait for it to finish or remove the lock file if the "
+                    "process crashed."
+                )
+            except ProcessLookupError:
+                # El proceso no existe, el lock file es huérfano
+                LOGGER.warning(
+                    "Found orphaned lock file (PID %d no longer exists). Removing it.",
+                    stored_pid,
+                )
+                lock_file.unlink()
+            except PermissionError:
+                # No tenemos permisos para verificar, pero el proceso podría existir
+                # Asumir que está corriendo para ser conservador
+                raise RuntimeError(
+                    f"Lock file exists and cannot verify if process {stored_pid} "
+                    f"is running. Lock file: {lock_file}. "
+                    "Please check manually or remove the lock file if safe."
+                ) from None
+        except (ValueError, OSError) as e:
+            # Error leyendo el lock file, asumir que está corrupto y eliminarlo
+            LOGGER.warning("Lock file appears corrupted. Removing it: %s", e)
+            try:
+                lock_file.unlink()
+            except OSError:
+                pass
+
+    # Crear el lock file con el PID actual
+    try:
+        with lock_file.open("w") as f:
+            f.write(str(os.getpid()))
+        LOGGER.debug("Created lock file: %s (PID: %d)", lock_file, os.getpid())
+    except OSError as e:
+        raise RuntimeError(f"Failed to create lock file {lock_file}: {e}") from e
+
+    try:
+        yield
+    finally:
+        # Eliminar el lock file al salir
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
+                LOGGER.debug("Removed lock file: %s", lock_file)
+        except OSError as e:
+            LOGGER.warning("Failed to remove lock file %s: %s", lock_file, e)
 
 
 @contextmanager
@@ -135,6 +209,64 @@ def write_results_incremental(
         writer.writerows(results)
 
     LOGGER.info("Wrote %d results to %s (append=%s)", len(results), output_path, append)
+
+
+def write_results_with_lock(
+    output_path: Path,
+    results: List[dict],
+    fieldnames: List[str] | None,
+) -> None:
+    """Escribir resultados al CSV con lock file para sincronización entre procesos."""
+    if not results:
+        return
+
+    # Si fieldnames es None, determinarlos del primer resultado
+    if fieldnames is None:
+        if results:
+            fieldnames = list(results[0].keys())
+        else:
+            return
+
+    lock_file = output_path.parent / f".{output_path.name}.lock"
+    max_wait = 30  # segundos máximo de espera
+    wait_interval = 0.1  # segundos entre intentos
+
+    file_exists = output_path.exists()
+    start_time = time.time()
+
+    # Intentar adquirir lock
+    while time.time() - start_time < max_wait:
+        try:
+            # Intentar crear lock file exclusivamente
+            if not lock_file.exists():
+                with lock_file.open("x") as f:
+                    f.write(str(os.getpid()))
+                break
+        except FileExistsError:
+            # Otro proceso tiene el lock, esperar
+            time.sleep(wait_interval)
+            continue
+    else:
+        # Timeout esperando lock
+        LOGGER.warning("Timeout waiting for lock file, writing without lock (may cause conflicts)")
+        lock_file = None
+
+    try:
+        # Escribir resultados
+        with output_path.open("a" if file_exists else "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerows(results)
+
+        LOGGER.debug("Wrote %d results to %s (with lock)", len(results), output_path)
+    finally:
+        # Liberar lock
+        if lock_file and lock_file.exists():
+            try:
+                lock_file.unlink()
+            except OSError:
+                pass
 
 
 def pick_users(connection: sqlite3.Connection, min_ratings: int, sample_size: int) -> List[str]:
@@ -282,27 +414,76 @@ def evaluate_user(
     with _withheld_interactions(connection, user_id, holdout):
         build_candidate_pool(connection, user_id, holdout, pool_size)
 
-        recommended_hybrid = recommender.recommend(user_id, limit=k)
-        recommended_advanced = recommender.recommend_advanced(user_id, limit=k)
-        recommended_nmf = recommender.recommend_nmf(user_id, limit=k)
-        recommended_two_towers = recommender.recommend_two_towers(user_id, limit=k)
-        recommended_pairs = recommender.recommend_from_pairs(user_id, limit=k)
-        recommended_content = recommender.recommend_content_based(user_id, limit=k)
-        recommended_random = recommender.recommend_random(user_id, limit=k)
-        recommended_popular = recommender._popular_unseen_releases(user_id, k)
+        # Paralelizar sistemas de recomendación usando ThreadPoolExecutor
+        # Los sistemas son I/O bound (queries a DB), así que threads son apropiados
+        recommendations = {}
+
+        def get_recommendation(system_name: str, func):
+            """Wrapper para capturar excepciones y retornar lista vacía si falla."""
+            try:
+                return system_name, func()
+            except Exception as e:
+                LOGGER.debug("Error in %s for user %s: %s", system_name, user_id, e)
+                return system_name, []
+
+        # Definir sistemas a ejecutar en paralelo
+        # Algunas funciones usan keyword-only arguments para limit
+        systems = [
+            ("hybrid", lambda: recommender.recommend(user_id, limit=k)),
+            ("advanced", lambda: recommender.recommend_advanced(user_id, limit=k)),
+            ("nmf", lambda: recommender.recommend_nmf(user_id, limit=k)),
+            ("two_towers", lambda: recommender.recommend_two_towers(user_id, limit=k)),
+            ("pairs", lambda: recommender.recommend_from_pairs(user_id, limit=k)),
+            ("content", lambda: recommender.recommend_content_based(user_id, limit=k)),
+            ("random", lambda: recommender.recommend_random(user_id, limit=k)),
+            ("popular", lambda: recommender._popular_unseen_releases(user_id, k)),
+        ]
+
+        # Ejecutar sistemas en paralelo (máximo 2 threads para reducir memoria)
+        # Con 6 workers × 2 threads = 12 threads totales (vs 6 × 8 = 48 antes)
+        # Esto reduce memoria significativamente mientras mantiene paralelización de I/O
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(get_recommendation, name, func): name for name, func in systems
+            }
+
+            for future in as_completed(futures):
+                system_name, result = future.result()
+                recommendations[system_name] = result
+                # Limpiar future inmediatamente
+                del future
+
+            # Limpiar futures dict después de completar
+            del futures
+            gc.collect()
+
+        # Extraer resultados
+        recommended_hybrid = recommendations.get("hybrid", [])
+        recommended_advanced = recommendations.get("advanced", [])
+        recommended_nmf = recommendations.get("nmf", [])
+        recommended_two_towers = recommendations.get("two_towers", [])
+        recommended_pairs = recommendations.get("pairs", [])
+        recommended_content = recommendations.get("content", [])
+        recommended_random = recommendations.get("random", [])
+        recommended_popular = recommendations.get("popular", [])
 
     # Cargar metadata para todas las recomendaciones
-    all_recommended_ids = (
-        recommended_hybrid
-        + recommended_advanced
-        + recommended_nmf
-        + recommended_two_towers
-        + recommended_pairs
-        + recommended_content
-        + recommended_random
-        + recommended_popular
-    )
-    unique_release_ids = list(set(all_recommended_ids))
+    # Usar set para deduplicar eficientemente
+    all_recommended_ids = set()
+    all_recommended_ids.update(recommended_hybrid)
+    all_recommended_ids.update(recommended_advanced)
+    all_recommended_ids.update(recommended_nmf)
+    all_recommended_ids.update(recommended_two_towers)
+    all_recommended_ids.update(recommended_pairs)
+    all_recommended_ids.update(recommended_content)
+    all_recommended_ids.update(recommended_random)
+    all_recommended_ids.update(recommended_popular)
+
+    unique_release_ids = list(all_recommended_ids)
+    # Limpiar el set grande inmediatamente
+    del all_recommended_ids
+    gc.collect()
+
     release_to_genres, release_to_artist, release_to_ratings_count = load_release_metadata(
         connection, unique_release_ids
     )
@@ -310,7 +491,15 @@ def evaluate_user(
     # max_ratings_count ahora se pasa como parámetro (calculado una sola vez)
     relevance_set = set(holdout)
 
-    def calculate_metrics(recommended: List[int], prefix: str) -> dict:
+    def calculate_metrics(
+        recommended: List[int],
+        prefix: str,
+        rel_set: set[int],
+        rel_to_genres: dict[int, list[int]],
+        rel_to_artist: dict[int, int],
+        rel_to_ratings_count: dict[int, int],
+        max_ratings: int,
+    ) -> dict:
         """Calcular todas las métricas para una lista de recomendaciones."""
         if not recommended:
             return {
@@ -324,18 +513,16 @@ def evaluate_user(
                 f"{prefix}_novelty": 0.0,
             }
 
-        scores = [1.0 if release_id in relevance_set else 0.0 for release_id in recommended]
+        scores = [1.0 if release_id in rel_set else 0.0 for release_id in recommended]
         return {
             f"{prefix}_ndcg": metrics.normalized_discounted_cumulative_gain(scores),
-            f"{prefix}_precision": metrics.precision_at_k(recommended, relevance_set, k),
-            f"{prefix}_recall": metrics.recall_at_k(recommended, relevance_set, k),
-            f"{prefix}_f1": metrics.f1_at_k(recommended, relevance_set, k),
-            f"{prefix}_mrr": metrics.mean_reciprocal_rank(recommended, relevance_set),
-            f"{prefix}_genre_diversity": metrics.genre_diversity(recommended, release_to_genres),
-            f"{prefix}_artist_diversity": metrics.artist_diversity(recommended, release_to_artist),
-            f"{prefix}_novelty": metrics.novelty(
-                recommended, release_to_ratings_count, max_ratings_count
-            ),
+            f"{prefix}_precision": metrics.precision_at_k(recommended, rel_set, k),
+            f"{prefix}_recall": metrics.recall_at_k(recommended, rel_set, k),
+            f"{prefix}_f1": metrics.f1_at_k(recommended, rel_set, k),
+            f"{prefix}_mrr": metrics.mean_reciprocal_rank(recommended, rel_set),
+            f"{prefix}_genre_diversity": metrics.genre_diversity(recommended, rel_to_genres),
+            f"{prefix}_artist_diversity": metrics.artist_diversity(recommended, rel_to_artist),
+            f"{prefix}_novelty": metrics.novelty(recommended, rel_to_ratings_count, max_ratings),
         }
 
     result = {
@@ -344,14 +531,101 @@ def evaluate_user(
     }
 
     # Calcular métricas para cada estrategia
-    result.update(calculate_metrics(recommended_hybrid, "hybrid"))
-    result.update(calculate_metrics(recommended_advanced, "advanced"))
-    result.update(calculate_metrics(recommended_nmf, "nmf"))
-    result.update(calculate_metrics(recommended_two_towers, "two_towers"))
-    result.update(calculate_metrics(recommended_pairs, "pairs"))
-    result.update(calculate_metrics(recommended_content, "content"))
-    result.update(calculate_metrics(recommended_random, "random"))
-    result.update(calculate_metrics(recommended_popular, "popular"))
+    result.update(
+        calculate_metrics(
+            recommended_hybrid,
+            "hybrid",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_advanced,
+            "advanced",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_nmf,
+            "nmf",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_two_towers,
+            "two_towers",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_pairs,
+            "pairs",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_content,
+            "content",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_random,
+            "random",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_popular,
+            "popular",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+
+    # Limpiar memoria explícitamente antes de retornar
+    del recommended_hybrid, recommended_advanced, recommended_nmf, recommended_two_towers
+    del recommended_pairs, recommended_content, recommended_random, recommended_popular
+    del unique_release_ids, release_to_genres, release_to_artist, release_to_ratings_count
+    del recommendations, relevance_set
+    gc.collect()
 
     return result
 
@@ -367,23 +641,38 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
         max_ratings_count,
         chunk_id,
         verbose,
+        sqlite_threads,
+        output_path_str,
+        fieldnames,
     ) = args
 
     # Configurar logging en el proceso hijo (necesario para multiprocessing)
     configure_logging(verbose)
 
     database_path = Path(database_path_str)
+    output_path = Path(output_path_str) if output_path_str else None
     results = []
+    save_interval = 50  # Guardar cada 50 usuarios
+    saved_count = 0  # Contador de resultados ya guardados
+
+    # Limpiar memoria al inicio del proceso hijo (reduce memoria heredada del fork)
+    gc.collect()
 
     # Cada proceso tiene su propia conexión
     with sqlite3.connect(database_path) as connection:
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA cache_size=-128000")  # 128MB cache (aumentado)
+        # Cache muy reducido para procesos hijos (32MB por proceso)
+        connection.execute(
+            "PRAGMA cache_size=-32000"
+        )  # 32MB cache (reducido para procesos paralelos)
         connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
-        connection.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
-        connection.execute("PRAGMA threads=4")  # Usar múltiples threads para queries
+        # mmap_size muy reducido para procesos hijos (64MB por proceso)
+        connection.execute(
+            "PRAGMA mmap_size=67108864"
+        )  # 64MB memory-mapped I/O (reducido para procesos paralelos)
+        connection.execute(f"PRAGMA threads={sqlite_threads}")  # Threads ajustados según workers
         connection.row_factory = sqlite3.Row
 
         total_users = len(user_ids)
@@ -402,16 +691,51 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
                     if result:
                         results.append(result)
 
+                        # Limpiar memoria después de cada usuario procesado
+                        if idx % 10 == 0:  # Cada 10 usuarios
+                            gc.collect()
+
+                    # Guardar resultados cada N usuarios si hay output path
+                    if output_path and len(results) - saved_count >= save_interval:
+                        # Determinar fieldnames si no están disponibles
+                        current_fieldnames = fieldnames
+                        if current_fieldnames is None and results:
+                            current_fieldnames = list(results[0].keys())
+
+                        if current_fieldnames:
+                            # Guardar solo los nuevos resultados desde el último guardado
+                            batch_to_save = results[saved_count : saved_count + save_interval]
+                            write_results_with_lock(output_path, batch_to_save, current_fieldnames)
+                            saved_count += len(batch_to_save)
+                            # Limpiar batch guardado de la lista para liberar memoria
+                            # (mantenemos solo los índices, no los datos)
+                            LOGGER.debug(
+                                "Chunk %d: Saved %d results (total processed: %d, total saved: %d)",
+                                chunk_id,
+                                len(batch_to_save),
+                                idx,
+                                saved_count,
+                            )
+                            gc.collect()
+
                     # Logging progreso cada 100 usuarios o si verbose
                     if verbose or idx % 100 == 0:
                         LOGGER.info(
-                            "Chunk %d: [%d/%d] %s -> NDCG hybrid=%.4f advanced=%.4f",
+                            "Chunk %d: [%d/%d] %s -> NDCG hybrid=%.4f advanced=%.4f "
+                            "nmf=%.4f two_towers=%.4f pairs=%.4f content=%.4f "
+                            "random=%.4f popular=%.4f",
                             chunk_id,
                             idx,
                             total_users,
                             user_id,
                             result.get("hybrid_ndcg", 0.0) if result else 0.0,
                             result.get("advanced_ndcg", 0.0) if result else 0.0,
+                            result.get("nmf_ndcg", 0.0) if result else 0.0,
+                            result.get("two_towers_ndcg", 0.0) if result else 0.0,
+                            result.get("pairs_ndcg", 0.0) if result else 0.0,
+                            result.get("content_ndcg", 0.0) if result else 0.0,
+                            result.get("random_ndcg", 0.0) if result else 0.0,
+                            result.get("popular_ndcg", 0.0) if result else 0.0,
                         )
                     break  # Éxito, salir del loop de retry
                 except sqlite3.OperationalError as e:
@@ -434,6 +758,26 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
                 except Exception as e:
                     LOGGER.warning("Error evaluating user %s in chunk %d: %s", user_id, chunk_id, e)
                     break
+
+        # Guardar resultados restantes al final del chunk (los que no se guardaron en batches)
+        if output_path and results and saved_count < len(results):
+            # Determinar fieldnames si no están disponibles
+            current_fieldnames = fieldnames
+            if current_fieldnames is None and results:
+                current_fieldnames = list(results[0].keys())
+
+            if current_fieldnames:
+                # Guardar los resultados que quedan sin guardar
+                remaining = results[saved_count:]
+                if remaining:
+                    write_results_with_lock(output_path, remaining, current_fieldnames)
+                    saved_count += len(remaining)
+                    LOGGER.debug(
+                        "Chunk %d: Saved final %d results (total saved: %d)",
+                        chunk_id,
+                        len(remaining),
+                        saved_count,
+                    )
 
     LOGGER.info(
         "Chunk %d completed: %d/%d users processed successfully",
@@ -463,14 +807,28 @@ def evaluate(
         num_workers = max(1, multiprocessing.cpu_count() - 1)  # Dejar 1 core libre
     LOGGER.info("Using %d worker processes", num_workers)
 
+    # Calcular threads SQLite por worker: distribuir núcleos entre workers
+    # Máximo 4 threads por worker, mínimo 1, balanceando según núcleos disponibles
+    cpu_count = multiprocessing.cpu_count()
+    sqlite_threads = max(1, min(4, cpu_count // num_workers))
+    LOGGER.info(
+        "SQLite threads per worker: %d (total capacity: %d threads)",
+        sqlite_threads,
+        num_workers * sqlite_threads,
+    )
+
     with sqlite3.connect(database_path) as connection:
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        connection.execute("PRAGMA cache_size=-128000")  # 128MB cache (aumentado)
+        # Cache reducido para proceso principal también (32MB)
+        connection.execute("PRAGMA cache_size=-32000")  # 32MB cache (reducido para ahorrar memoria)
         connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
-        connection.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
-        connection.execute("PRAGMA threads=4")  # Usar múltiples threads para queries
+        # mmap_size reducido para proceso principal también (64MB)
+        connection.execute(
+            "PRAGMA mmap_size=67108864"
+        )  # 64MB memory-mapped I/O (reducido para ahorrar memoria)
+        connection.execute(f"PRAGMA threads={sqlite_threads}")  # Threads ajustados según workers
         connection.row_factory = sqlite3.Row
 
         # Optimización: Calcular max_ratings_count UNA SOLA VEZ antes del loop
@@ -522,6 +880,20 @@ def evaluate(
         [len(chunk) for chunk in user_chunks],
     )
 
+    # Determinar fieldnames para escritura incremental (necesario para guardado cada 50 usuarios)
+    fieldnames = None
+    if output and output.exists():
+        # Leer fieldnames del archivo existente
+        try:
+            with output.open("r", encoding="utf-8") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames
+        except Exception:
+            pass
+
+    # Si no hay fieldnames, obtenerlos de una muestra (se determinarán después del primer resultado)
+    # Por ahora usar None y se determinarán en el primer guardado
+
     # Preparar argumentos para cada chunk
     chunk_args = [
         (
@@ -533,26 +905,21 @@ def evaluate(
             max_ratings_count,
             chunk_id,
             verbose,
+            sqlite_threads,
+            str(output) if output else None,
+            fieldnames,
         )
         for chunk_id, chunk in enumerate(user_chunks, 1)
     ]
+
+    # Limpiar memoria antes de crear procesos hijos (reduce memoria heredada)
+    gc.collect()
 
     # Procesar chunks en paralelo
     results = []
     if num_workers > 1 and len(user_chunks) > 1:
         LOGGER.info("Processing chunks in parallel with %d workers...", num_workers)
         LOGGER.info("Total chunks: %d, Users per chunk: ~%d", len(user_chunks), chunk_size)
-
-        # Determinar fieldnames para escritura incremental
-        fieldnames = None
-        if output and output.exists():
-            # Leer fieldnames del archivo existente
-            try:
-                with output.open("r", encoding="utf-8") as handle:
-                    reader = csv.DictReader(handle)
-                    fieldnames = reader.fieldnames
-            except Exception:
-                pass
 
         # Usar imap_unordered para ver progreso en tiempo real
         with multiprocessing.Pool(processes=num_workers) as pool:
@@ -749,17 +1116,26 @@ def main(argv: Iterable[str] | None = None) -> int:
     database_path = resolve_database_path(args.database)
     output_path = Path(args.output).expanduser().resolve() if args.output else None
 
-    evaluate(
-        database_path,
-        args.min_ratings,
-        args.sample_size,
-        args.holdout_ratio,
-        args.k,
-        args.pool_size,
-        output_path,
-        args.verbose,
-        args.workers,
-    )
+    # Crear lock file en el directorio temporal o junto al script
+    lock_file_path = Path(__file__).parent / ".evaluate_recommender.lock"
+
+    try:
+        with _process_lock(lock_file_path):
+            evaluate(
+                database_path,
+                args.min_ratings,
+                args.sample_size,
+                args.holdout_ratio,
+                args.k,
+                args.pool_size,
+                output_path,
+                args.verbose,
+                args.workers,
+            )
+    except RuntimeError as e:
+        LOGGER.error(str(e))
+        return 1
+
     return 0
 
 
