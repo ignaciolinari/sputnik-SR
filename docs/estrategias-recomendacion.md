@@ -425,9 +425,11 @@ El modelo consiste en dos redes neuronales separadas:
    - Embeddings categóricos (role, artist, type, genres)
    - Capas densas para features numéricas
    - Dropout para regularización
-   - Loss: MSE (Mean Squared Error)
+   - Sampling de negativos configurable (`--num-negatives`, default 4) para construir pares positivo/negativo por usuario
+   - Loss: Binary Cross-Entropy con logits + class weights (da más peso a los positivos)
+   - Métricas online: `binary_accuracy` y `AUC` para monitorear convergencia
    - Optimizador: Adam con learning rate configurable
-   - Callbacks: Early stopping, ReduceLROnPlateau
+   - Callbacks: Early stopping y ReduceLROnPlateau (monitoreando AUC)
 
 4. **Almacenamiento:**
    - Guarda embeddings de usuarios en tabla `user_embeddings_dl`
@@ -523,6 +525,21 @@ python -m offline_recommender.build_two_towers \
 **Tiempo estimado**:
 - Prueba rápida (50k interacciones): ~30 segundos
 - Entrenamiento completo (8M interacciones): 3-6 horas en CPU
+
+**Checkpoints y reanudación:**
+- `--checkpoint-path`: guarda los mejores pesos del modelo combinado al final de cada epoch (solo weights). Recomendado apuntar a `models/Two Towers/checkpoints/*.weights.h5`.
+- `--resume-from-checkpoint`: carga esos pesos antes de entrenar y continúa la corrida (mantiene el estado del optimizador). Útil si la máquina se reinicia o si querés seguir refinando un modelo previo sin empezar desde cero.
+
+Con esto podés dividir entrenamientos largos en múltiples sesiones sin perder el progreso.
+
+### Evaluación automática con NDCG@k
+
+El mismo script puede reservar interacciones para un holdout por usuario y calcular NDCG@k sin necesidad de correr `evaluate_recommender.py`.
+
+- Activalo con `--evaluate-ndcg`. El parámetro `--ndcg-holdout` (default 0.2) define qué fracción de interacciones positivas se reserva por usuario y `--ndcg-min-test-items` asegura que cada usuario tenga suficientes ítems en el holdout.
+- `--ndcg-k` controla el tamaño del ranking evaluado (default 9) y `--ndcg-max-users` permite limitar la cantidad de usuarios evaluados para corridas rápidas.
+- El pipeline separa las interacciones, entrena el modelo sobre el split de entrenamiento y luego evalúa usando los towers recién entrenados. La métrica se registra en `models/Two Towers/two_towers_<db>_metadata.json` junto con el número de usuarios evaluados y los parámetros de holdout.
+- Esto replica el flujo automatizado de NMF (que optimiza con NDCG) y deja trazabilidad de cada corrida para comparar modelos sin lanzar scripts adicionales.
 
 ### Actualización de Embeddings
 

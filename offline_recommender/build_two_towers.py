@@ -10,10 +10,14 @@ import argparse
 import json
 import logging
 import math
+import random
 import sqlite3
+import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 from typing import Dict
 from typing import List
 from typing import Tuple
@@ -21,14 +25,27 @@ from typing import Tuple
 import numpy as np
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
 try:
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras import layers
+    from tensorflow.keras import regularizers
 except ImportError:
     tf = None
     keras = None
     layers = None
+    regularizers = None
+
+
+try:
+    from app import metrics as app_metrics
+except ImportError:
+    app_metrics = None
 
 
 LOGGER = logging.getLogger("build_two_towers")
@@ -134,9 +151,7 @@ def extract_user_features(
     }
 
 
-def extract_item_features(
-    connection: sqlite3.Connection, release_id: int
-) -> Dict[str, float | int | List[int]]:
+def extract_item_features(connection: sqlite3.Connection, release_id: int) -> Dict[str, Any]:
     """Extract item (release) features from database.
 
     Returns:
@@ -210,37 +225,36 @@ def extract_item_features(
     }
 
 
-def build_user_tower(num_roles: int = 10, embedding_dim: int = 64) -> keras.Model:
-    """Build user tower model.
+def build_user_tower(
+    num_users: int,
+    num_roles: int = 10,
+    embedding_dim: int = 64,
+) -> keras.Model:
+    """Build user tower model with ID embeddings."""
 
-    Args:
-        num_roles: Number of distinct roles
-        embedding_dim: Dimension of output embedding
-
-    Returns:
-        Keras Model for user tower
-    """
-    # Inputs
+    user_id_input = layers.Input(shape=(), name="user_id", dtype="int32")
     role_input = layers.Input(shape=(), name="user_role", dtype="int32")
     numeric_input = layers.Input(shape=(5,), name="user_numeric")
 
-    # Role embedding
+    user_id_emb = layers.Embedding(
+        num_users,
+        embedding_dim,
+        embeddings_regularizer=regularizers.l2(1e-6),
+        name="user_id_embedding",
+    )(user_id_input)
+
     role_emb = layers.Embedding(num_roles, 8, name="role_embedding")(role_input)
     role_emb = layers.Flatten()(role_emb)
 
-    # Numeric features processing
     numeric_emb = layers.Dense(32, activation="relu", name="numeric_dense_1")(numeric_input)
     numeric_emb = layers.Dropout(0.2, name="numeric_dropout_1")(numeric_emb)
     numeric_emb = layers.Dense(32, activation="relu", name="numeric_dense_2")(numeric_emb)
 
-    # Combine
-    combined = layers.Concatenate(name="user_combine")([role_emb, numeric_emb])
-    output = layers.Dense(embedding_dim, activation="relu", name="user_dense_1")(combined)
-    output = layers.Dropout(0.2, name="user_dropout")(output)
-    output = layers.Dense(embedding_dim, name="user_output")(output)
+    combined = layers.Concatenate(name="user_combine")([user_id_emb, role_emb, numeric_emb])
+    combined = layers.Dense(embedding_dim, activation="relu", name="user_dense_1")(combined)
+    combined = layers.Dropout(0.3, name="user_dropout")(combined)
+    output = layers.Dense(embedding_dim, name="user_output")(combined)
 
-    # L2 normalization for cosine similarity
-    # Usar función nombrada con output_shape para compatibilidad al guardar/cargar
     def l2_normalize_user(x):
         return tf.nn.l2_normalize(x, axis=1)
 
@@ -248,55 +262,64 @@ def build_user_tower(num_roles: int = 10, embedding_dim: int = 64) -> keras.Mode
         output
     )
 
-    return keras.Model(inputs=[role_input, numeric_input], outputs=output, name="user_tower")
+    return keras.Model(
+        inputs=[user_id_input, role_input, numeric_input], outputs=output, name="user_tower"
+    )
 
 
-def build_item_tower(num_artists: int, num_genres: int, embedding_dim: int = 64) -> keras.Model:
-    """Build item tower model.
+def build_item_tower(
+    num_releases: int,
+    num_artists: int,
+    num_genres: int,
+    embedding_dim: int = 64,
+) -> keras.Model:
+    """Build item tower model with ID embeddings and masked genre pooling."""
 
-    Args:
-        num_artists: Number of distinct artists
-        num_genres: Number of distinct genres
-        embedding_dim: Dimension of output embedding
-
-    Returns:
-        Keras Model for item tower
-    """
-    # Inputs
+    item_id_input = layers.Input(shape=(), name="item_id", dtype="int32")
     artist_input = layers.Input(shape=(), name="item_artist", dtype="int32")
     type_input = layers.Input(shape=(), name="item_type", dtype="int32")
     genres_input = layers.Input(shape=(None,), name="item_genres", dtype="int32")
     numeric_input = layers.Input(shape=(3,), name="item_numeric")
 
-    # Artist embedding
+    item_id_emb = layers.Embedding(
+        num_releases,
+        embedding_dim,
+        embeddings_regularizer=regularizers.l2(1e-6),
+        name="item_id_embedding",
+    )(item_id_input)
+
     artist_emb = layers.Embedding(num_artists, 16, name="artist_embedding")(artist_input)
     artist_emb = layers.Flatten()(artist_emb)
 
-    # Release type embedding
-    type_emb = layers.Embedding(4, 4, name="type_embedding")(
-        type_input
-    )  # LP, EP, Single, Compilation
+    type_emb = layers.Embedding(4, 4, name="type_embedding")(type_input)
     type_emb = layers.Flatten()(type_emb)
 
-    # Genres embedding (multi-hot with pooling)
-    genres_emb = layers.Embedding(num_genres, 8, name="genre_embedding")(genres_input)
-    genres_emb = layers.GlobalAveragePooling1D(name="genre_pooling")(genres_emb)
+    genre_emb = layers.Embedding(num_genres, 8, name="genre_embedding")(genres_input)
 
-    # Numeric features processing
+    def masked_genre_average(inputs):
+        embeddings, ids = inputs
+        mask = tf.cast(tf.not_equal(ids, 0), tf.float32)
+        mask = tf.expand_dims(mask, axis=-1)
+        summed = tf.reduce_sum(embeddings * mask, axis=1)
+        counts = tf.reduce_sum(mask, axis=1)
+        counts = tf.maximum(counts, tf.ones_like(counts))
+        return summed / counts
+
+    genres_emb = layers.Lambda(masked_genre_average, name="genre_pooling")(
+        [genre_emb, genres_input]
+    )
+
     numeric_emb = layers.Dense(16, activation="relu", name="item_numeric_dense_1")(numeric_input)
     numeric_emb = layers.Dropout(0.2, name="item_numeric_dropout_1")(numeric_emb)
     numeric_emb = layers.Dense(16, activation="relu", name="item_numeric_dense_2")(numeric_emb)
 
-    # Combine
     combined = layers.Concatenate(name="item_combine")(
-        [artist_emb, type_emb, genres_emb, numeric_emb]
+        [item_id_emb, artist_emb, type_emb, genres_emb, numeric_emb]
     )
-    output = layers.Dense(embedding_dim, activation="relu", name="item_dense_1")(combined)
-    output = layers.Dropout(0.2, name="item_dropout")(output)
-    output = layers.Dense(embedding_dim, name="item_output")(output)
+    combined = layers.Dense(embedding_dim, activation="relu", name="item_dense_1")(combined)
+    combined = layers.Dropout(0.3, name="item_dropout")(combined)
+    output = layers.Dense(embedding_dim, name="item_output")(combined)
 
-    # L2 normalization for cosine similarity
-    # Usar función nombrada con output_shape para compatibilidad al guardar/cargar
     def l2_normalize_item(x):
         return tf.nn.l2_normalize(x, axis=1)
 
@@ -305,14 +328,16 @@ def build_item_tower(num_artists: int, num_genres: int, embedding_dim: int = 64)
     )
 
     return keras.Model(
-        inputs=[artist_input, type_input, genres_input, numeric_input],
+        inputs=[item_id_input, artist_input, type_input, genres_input, numeric_input],
         outputs=output,
         name="item_tower",
     )
 
 
 def build_two_tower_model(
+    num_users: int,
     num_roles: int,
+    num_releases: int,
     num_artists: int,
     num_genres: int,
     embedding_dim: int = 64,
@@ -322,22 +347,29 @@ def build_two_tower_model(
     Returns:
         Tuple of (combined_model, user_tower, item_tower)
     """
-    user_tower = build_user_tower(num_roles=num_roles, embedding_dim=embedding_dim)
+    user_tower = build_user_tower(
+        num_users=num_users, num_roles=num_roles, embedding_dim=embedding_dim
+    )
     item_tower = build_item_tower(
-        num_artists=num_artists, num_genres=num_genres, embedding_dim=embedding_dim
+        num_releases=num_releases,
+        num_artists=num_artists,
+        num_genres=num_genres,
+        embedding_dim=embedding_dim,
     )
 
     # Combined model for training
+    user_id_input = layers.Input(shape=(), name="user_id", dtype="int32")
     user_role_input = layers.Input(shape=(), name="user_role", dtype="int32")
     user_numeric_input = layers.Input(shape=(5,), name="user_numeric")
+    item_id_input = layers.Input(shape=(), name="item_id", dtype="int32")
     item_artist_input = layers.Input(shape=(), name="item_artist", dtype="int32")
     item_type_input = layers.Input(shape=(), name="item_type", dtype="int32")
     item_genres_input = layers.Input(shape=(None,), name="item_genres", dtype="int32")
     item_numeric_input = layers.Input(shape=(3,), name="item_numeric")
 
-    user_emb = user_tower([user_role_input, user_numeric_input])
+    user_emb = user_tower([user_id_input, user_role_input, user_numeric_input])
     item_emb = item_tower(
-        [item_artist_input, item_type_input, item_genres_input, item_numeric_input]
+        [item_id_input, item_artist_input, item_type_input, item_genres_input, item_numeric_input]
     )
 
     # Dot product (score) - embeddings are L2 normalized, so dot product is in [-1, 1]
@@ -360,8 +392,10 @@ def build_two_tower_model(
 
     combined_model = keras.Model(
         inputs=[
+            user_id_input,
             user_role_input,
             user_numeric_input,
+            item_id_input,
             item_artist_input,
             item_type_input,
             item_genres_input,
@@ -382,9 +416,10 @@ def load_training_data(
     sample_size: int | None = None,
 ) -> Tuple[
     Dict[str, Dict[str, float | int]],
-    Dict[int, Dict[str, float | int | List[int]]],
+    Dict[int, Dict[str, Any]],
     List[Tuple[str, int, float]],
     Dict[str, int],
+    Dict[int, int],
     Dict[int, int],
     Dict[int, int],
     int,
@@ -412,52 +447,72 @@ def load_training_data(
     start = perf_counter()
 
     # Filter eligible users and releases
-    user_filter_query = """
-        SELECT id_user
-        FROM interactions
-        WHERE rating >= ?
-        GROUP BY id_user
-        HAVING COUNT(*) >= ?
-    """
-    eligible_users = {
-        row[0] for row in connection.execute(user_filter_query, (min_rating, min_user_ratings))
-    }
-    LOGGER.info("Found %d eligible users", len(eligible_users))
+    user_count = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT id_user
+            FROM interactions
+            WHERE rating >= ?
+            GROUP BY id_user
+            HAVING COUNT(*) >= ?
+        )
+        """,
+        (min_rating, min_user_ratings),
+    ).fetchone()[0]
+    LOGGER.info("Found %d eligible users", user_count)
 
-    release_filter_query = """
-        SELECT id_release
-        FROM interactions
-        WHERE rating >= ?
-        GROUP BY id_release
-        HAVING COUNT(*) >= ?
-    """
-    eligible_releases = {
-        row[0]
-        for row in connection.execute(release_filter_query, (min_rating, min_release_ratings))
-    }
-    LOGGER.info("Found %d eligible releases", len(eligible_releases))
+    release_count = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT id_release
+            FROM interactions
+            WHERE rating >= ?
+            GROUP BY id_release
+            HAVING COUNT(*) >= ?
+        )
+        """,
+        (min_rating, min_release_ratings),
+    ).fetchone()[0]
+    LOGGER.info("Found %d eligible releases", release_count)
 
-    if not eligible_users or not eligible_releases:
+    if not user_count or not release_count:
         raise ValueError("No eligible users or releases found with given filters")
 
-    # Load interactions
-    placeholders_users = ",".join("?" for _ in eligible_users)
-    placeholders_releases = ",".join("?" for _ in eligible_releases)
-
-    interactions_query = f"""
-        SELECT id_user, id_release, rating
-        FROM interactions
-        WHERE id_user IN ({placeholders_users})
-          AND id_release IN ({placeholders_releases})
-          AND rating >= ?
-        ORDER BY rating DESC
+    # Load interactions using CTEs to avoid massive IN clauses
+    interactions_query = """
+        WITH eligible_users AS (
+            SELECT id_user
+            FROM interactions
+            WHERE rating >= :rating_threshold
+            GROUP BY id_user
+            HAVING COUNT(*) >= :min_user_ratings
+        ),
+        eligible_releases AS (
+            SELECT id_release
+            FROM interactions
+            WHERE rating >= :rating_threshold
+            GROUP BY id_release
+            HAVING COUNT(*) >= :min_release_ratings
+        )
+        SELECT i.id_user, i.id_release, i.rating
+        FROM interactions AS i
+        JOIN eligible_users eu ON eu.id_user = i.id_user
+        JOIN eligible_releases er ON er.id_release = i.id_release
+        WHERE i.rating >= :rating_threshold
+        ORDER BY i.rating DESC
     """
     if sample_size:
-        interactions_query += f" LIMIT {sample_size}"
+        interactions_query += " LIMIT :sample_size"
 
-    interactions_rows = connection.execute(
-        interactions_query, list(eligible_users) + list(eligible_releases) + [min_rating]
-    ).fetchall()
+    query_params = {
+        "rating_threshold": min_rating,
+        "min_user_ratings": min_user_ratings,
+        "min_release_ratings": min_release_ratings,
+    }
+    if sample_size:
+        query_params["sample_size"] = sample_size
+
+    interactions_rows = connection.execute(interactions_query, query_params).fetchall()
 
     interactions = [
         (row["id_user"], int(row["id_release"]), float(row["rating"])) for row in interactions_rows
@@ -472,27 +527,38 @@ def load_training_data(
     for user_id in user_ids:
         user_features[user_id] = extract_user_features(connection, user_id, now)
 
+    # Build genre vocabulary (reserve 0 for padding / unknown)
+    LOGGER.info("Building genre vocabulary...")
+    genre_rows = connection.execute(
+        """
+        SELECT id_genre
+        FROM genres
+        ORDER BY id_genre
+        """
+    ).fetchall()
+    genre_to_idx = {int(row[0]): idx + 1 for idx, row in enumerate(genre_rows)}
+    num_genres = (len(genre_to_idx) + 1) if genre_to_idx else 1
+
     # Extract item features
     LOGGER.info("Extracting item features...")
     item_features = {}
     release_ids = sorted(set(release_id for _, release_id, _ in interactions))
     for release_id in release_ids:
-        item_features[release_id] = extract_item_features(connection, release_id)
+        release_features = extract_item_features(connection, release_id)
+        raw_genres = release_features.get("genre_ids", [])
+        release_features["genre_ids"] = [genre_to_idx.get(gid, 0) for gid in raw_genres]
+        item_features[release_id] = release_features
 
     # Get unique artist IDs from interactions (not all artists in DB)
     unique_artist_ids = sorted(
         set(item_features[release_id]["artist_id"] for release_id in release_ids)
     )
-    artist_to_idx = {artist_id: idx for idx, artist_id in enumerate(unique_artist_ids)}
-    num_artists = len(unique_artist_ids)
-
-    # Get vocabulary sizes for genres (use all genres in DB)
-    num_genres_query = "SELECT COUNT(*) FROM genres"
-    num_genres = connection.execute(num_genres_query).fetchone()[0] or 1
+    artist_to_idx = {artist_id: idx + 1 for idx, artist_id in enumerate(unique_artist_ids)}
+    num_artists = len(artist_to_idx) + 1  # Reserve 0 for unknown artists
 
     # Create mappings
-    user_to_idx = {user_id: idx for idx, user_id in enumerate(user_ids)}
-    release_to_idx = {release_id: idx for idx, release_id in enumerate(release_ids)}
+    user_to_idx = {user_id: idx + 1 for idx, user_id in enumerate(user_ids)}
+    release_to_idx = {release_id: idx + 1 for idx, release_id in enumerate(release_ids)}
 
     elapsed = perf_counter() - start
     LOGGER.info("Data loading completed in %.2fs", elapsed)
@@ -504,6 +570,7 @@ def load_training_data(
         user_to_idx,
         release_to_idx,
         artist_to_idx,
+        genre_to_idx,
         num_artists,
         num_genres,
     )
@@ -512,87 +579,299 @@ def load_training_data(
 def prepare_batch_data(
     interactions: List[Tuple[str, int, float]],
     user_features: Dict[str, Dict[str, float | int]],
-    item_features: Dict[int, Dict[str, float | int | List[int]]],
+    item_features: Dict[int, Dict[str, Any]],
+    user_to_idx: Dict[str, int],
+    release_to_idx: Dict[int, int],
     artist_to_idx: Dict[int, int],
-    max_genres: int = 10,
+    release_ids: List[int],
+    num_negatives: int,
+    max_genres: int,
+    seed: int,
 ) -> Dict[str, np.ndarray]:
-    """Prepare batch data for training.
+    """Prepare positive + sampled negative pairs for training."""
 
-    Args:
-        interactions: List of (user_id, release_id, rating)
-        user_features: User features dictionary
-        item_features: Item features dictionary
-        max_genres: Maximum number of genres to pad/truncate
+    rng = np.random.default_rng(seed)
+    release_pool = np.array(release_ids, dtype=np.int32)
 
-    Returns:
-        Dictionary with batched features and ratings
-    """
-    # User features
-    user_roles = np.array(
-        [user_features[user_id]["role_idx"] for user_id, _, _ in interactions], dtype=np.int32
-    )
-    user_numeric = np.array(
-        [
+    batch_data: Dict[str, List[Any]] = {
+        "user_id_idx": [],
+        "user_role": [],
+        "user_numeric": [],
+        "item_id_idx": [],
+        "item_artist": [],
+        "item_type": [],
+        "item_genres": [],
+        "item_numeric": [],
+        "labels": [],
+    }
+
+    def pad_genres(raw_ids: List[int] | None) -> List[int]:
+        genre_ids = list(raw_ids or [])
+        if len(genre_ids) >= max_genres:
+            return genre_ids[:max_genres]
+        return genre_ids + [0] * (max_genres - len(genre_ids))
+
+    def append_example(user_id: str, release_id: int, label: float) -> None:
+        user_feat = user_features[user_id]
+        item_feat = item_features[release_id]
+
+        batch_data["user_id_idx"].append(user_to_idx.get(user_id, 0))
+        batch_data["user_role"].append(int(user_feat["role_idx"]))
+        batch_data["user_numeric"].append(
             [
-                user_features[user_id]["objectivity_score"],
-                user_features[user_id]["soundoffs"],
-                user_features[user_id]["ratings_count"],
-                user_features[user_id]["days_since_join"],
-                user_features[user_id]["days_since_active"],
+                float(user_feat["objectivity_score"]),
+                float(user_feat["soundoffs"]),
+                float(user_feat["ratings_count"]),
+                float(user_feat["days_since_join"]),
+                float(user_feat["days_since_active"]),
             ]
-            for user_id, _, _ in interactions
-        ],
-        dtype=np.float32,
-    )
+        )
 
-    # Item features - map artist_id to consecutive index
-    item_artists = np.array(
+        batch_data["item_id_idx"].append(release_to_idx.get(release_id, 0))
+        batch_data["item_artist"].append(artist_to_idx.get(int(item_feat["artist_id"]), 0))
+        batch_data["item_type"].append(int(item_feat["release_type_idx"]))
+        raw_genres = item_feat.get("genre_ids", [])
+        genre_list = raw_genres if isinstance(raw_genres, list) else []
+        batch_data["item_genres"].append(pad_genres(genre_list))
+        batch_data["item_numeric"].append(
+            [
+                float(item_feat["release_year_norm"]),
+                float(item_feat["avg_rating_norm"]),
+                float(item_feat["ratings_count_norm"]),
+            ]
+        )
+        batch_data["labels"].append(label)
+
+    for user_id, release_id, _ in interactions:
+        append_example(user_id, release_id, 1.0)
+
+        for _ in range(num_negatives):
+            neg_release = int(rng.choice(release_pool))
+            # Avoid sampling the same positive item
+            while neg_release == release_id:
+                neg_release = int(rng.choice(release_pool))
+            append_example(user_id, neg_release, 0.0)
+
+    # Convert to numpy arrays
+    np_data: Dict[str, np.ndarray] = {
+        "user_id_idx": np.array(batch_data["user_id_idx"], dtype=np.int32),
+        "user_role": np.array(batch_data["user_role"], dtype=np.int32),
+        "user_numeric": np.array(batch_data["user_numeric"], dtype=np.float32),
+        "item_id_idx": np.array(batch_data["item_id_idx"], dtype=np.int32),
+        "item_artist": np.array(batch_data["item_artist"], dtype=np.int32),
+        "item_type": np.array(batch_data["item_type"], dtype=np.int32),
+        "item_genres": np.array(batch_data["item_genres"], dtype=np.int32),
+        "item_numeric": np.array(batch_data["item_numeric"], dtype=np.float32),
+        "labels": np.array(batch_data["labels"], dtype=np.float32),
+    }
+
+    # Shuffle to avoid ordering effects
+    indices = rng.permutation(np_data["labels"].shape[0])
+    for key in np_data:
+        np_data[key] = np_data[key][indices]
+
+    return np_data
+
+
+def build_positive_lookup(interactions: List[Tuple[str, int, float]]) -> Dict[str, set[int]]:
+    """Return positive interactions per user for filtering during evaluation."""
+
+    positives: Dict[str, set[int]] = defaultdict(set)
+    for user_id, release_id, _ in interactions:
+        positives[user_id].add(release_id)
+    return positives
+
+
+def split_interactions_for_ndcg(
+    interactions: List[Tuple[str, int, float]],
+    holdout_fraction: float,
+    min_test_items: int,
+    seed: int,
+) -> Tuple[List[Tuple[str, int, float]], Dict[str, set[int]]]:
+    """Split per-user interactions into train and evaluation subsets."""
+
+    if not 0.0 < holdout_fraction < 1.0:
+        raise ValueError("holdout_fraction must be between 0 and 1")
+
+    rng = random.Random(seed)
+    per_user: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
+    for user_id, release_id, rating in interactions:
+        per_user[user_id].append((release_id, rating))
+
+    train_interactions: List[Tuple[str, int, float]] = []
+    holdout_items: Dict[str, set[int]] = {}
+
+    for user_id, items in per_user.items():
+        if len(items) <= min_test_items:
+            train_interactions.extend((user_id, release_id, rating) for release_id, rating in items)
+            continue
+
+        items_copy = list(items)
+        rng.shuffle(items_copy)
+
+        desired_holdout = max(min_test_items, int(round(len(items_copy) * holdout_fraction)))
+        if desired_holdout >= len(items_copy):
+            desired_holdout = len(items_copy) - 1
+
+        if desired_holdout <= 0:
+            train_subset = items_copy
+            holdout_subset: List[Tuple[int, float]] = []
+        else:
+            holdout_subset = items_copy[:desired_holdout]
+            train_subset = items_copy[desired_holdout:]
+
+        if not train_subset:
+            train_subset = items_copy[-1:]
+            holdout_subset = items_copy[:-1]
+
+        if holdout_subset:
+            holdout_items[user_id] = {release_id for release_id, _ in holdout_subset}
+
+        train_interactions.extend(
+            (user_id, release_id, rating) for release_id, rating in train_subset
+        )
+
+    return train_interactions, holdout_items
+
+
+def evaluate_two_tower_ndcg(
+    user_tower: keras.Model,
+    item_tower: keras.Model,
+    user_features: Dict[str, Dict[str, float | int]],
+    item_features: Dict[int, Dict[str, Any]],
+    user_to_idx: Dict[str, int],
+    release_to_idx: Dict[int, int],
+    artist_to_idx: Dict[int, int],
+    train_positive_items: Dict[str, set[int]],
+    holdout_items: Dict[str, set[int]],
+    max_genres: int,
+    k: int,
+    max_users: int | None = None,
+) -> Tuple[float, int]:
+    """Compute NDCG@k on holdout positives."""
+
+    if app_metrics is None:
+        raise ImportError(
+            "app.metrics is required for NDCG evaluation. Make sure the app module is importable."
+        )
+
+    if not holdout_items:
+        LOGGER.warning("NDCG evaluation requested but no holdout interactions were generated")
+        return 0.0, 0
+
+    release_ids = sorted(release_to_idx.keys())
+    if not release_ids:
+        return 0.0, 0
+
+    def pad_genres(raw_ids: List[int] | None) -> List[int]:
+        genre_ids = list(raw_ids or [])
+        if len(genre_ids) >= max_genres:
+            return genre_ids[:max_genres]
+        return genre_ids + [0] * (max_genres - len(genre_ids))
+
+    release_array = np.array(release_ids, dtype=np.int32)
+    release_idx_lookup = {release_id: idx for idx, release_id in enumerate(release_ids)}
+
+    item_id_idx = np.array(
+        [release_to_idx[release_id] for release_id in release_ids], dtype=np.int32
+    )
+    item_artist = np.array(
         [
-            artist_to_idx.get(item_features[release_id]["artist_id"], 0)
-            for _, release_id, _ in interactions
+            artist_to_idx.get(int(item_features[release_id]["artist_id"]), 0)
+            for release_id in release_ids
         ],
         dtype=np.int32,
     )
-    item_types = np.array(
-        [item_features[release_id]["release_type_idx"] for _, release_id, _ in interactions],
+    item_type = np.array(
+        [int(item_features[release_id]["release_type_idx"]) for release_id in release_ids],
         dtype=np.int32,
     )
-
-    # Genres (pad/truncate to max_genres)
-    item_genres_list = []
-    for _, release_id, _ in interactions:
-        genre_ids = item_features[release_id]["genre_ids"]
-        if len(genre_ids) > max_genres:
-            genre_ids = genre_ids[:max_genres]
-        elif len(genre_ids) < max_genres:
-            genre_ids = genre_ids + [0] * (max_genres - len(genre_ids))
-        item_genres_list.append(genre_ids)
-    item_genres = np.array(item_genres_list, dtype=np.int32)
-
+    item_genres = np.array(
+        [pad_genres(item_features[release_id].get("genre_ids", [])) for release_id in release_ids],
+        dtype=np.int32,
+    )
     item_numeric = np.array(
         [
             [
-                item_features[release_id]["release_year_norm"],
-                item_features[release_id]["avg_rating_norm"],
-                item_features[release_id]["ratings_count_norm"],
+                float(item_features[release_id]["release_year_norm"]),
+                float(item_features[release_id]["avg_rating_norm"]),
+                float(item_features[release_id]["ratings_count_norm"]),
             ]
-            for _, release_id, _ in interactions
+            for release_id in release_ids
         ],
         dtype=np.float32,
     )
 
-    # Ratings
-    ratings = np.array([rating for _, _, rating in interactions], dtype=np.float32)
+    item_embeddings = item_tower.predict(
+        [item_id_idx, item_artist, item_type, item_genres, item_numeric],
+        batch_size=2048,
+        verbose=0,
+    )
 
-    return {
-        "user_role": user_roles,
-        "user_numeric": user_numeric,
-        "item_artist": item_artists,
-        "item_type": item_types,
-        "item_genres": item_genres,
-        "item_numeric": item_numeric,
-        "ratings": ratings,
-    }
+    ndcg_scores: List[float] = []
+    evaluated_users = 0
+
+    for user_id, test_items in holdout_items.items():
+        if max_users is not None and evaluated_users >= max_users:
+            break
+
+        user_feat = user_features.get(user_id)
+        if not user_feat:
+            continue
+
+        train_items = train_positive_items.get(user_id, set())
+        candidate_mask = np.ones(len(release_ids), dtype=bool)
+        for release_id in train_items:
+            idx = release_idx_lookup.get(release_id)
+            if idx is not None:
+                candidate_mask[idx] = False
+
+        if not candidate_mask.any():
+            continue
+
+        user_inputs = [
+            np.array([user_to_idx.get(user_id, 0)], dtype=np.int32),
+            np.array([int(user_feat["role_idx"])], dtype=np.int32),
+            np.array(
+                [
+                    [
+                        float(user_feat["objectivity_score"]),
+                        float(user_feat["soundoffs"]),
+                        float(user_feat["ratings_count"]),
+                        float(user_feat["days_since_join"]),
+                        float(user_feat["days_since_active"]),
+                    ]
+                ],
+                dtype=np.float32,
+            ),
+        ]
+
+        user_embedding = user_tower.predict(user_inputs, verbose=0)[0]
+
+        candidate_embeddings = item_embeddings[candidate_mask]
+        candidate_ids = release_array[candidate_mask]
+
+        if candidate_embeddings.size == 0:
+            continue
+
+        scores = candidate_embeddings @ user_embedding
+
+        if scores.size <= k:
+            ranking_indices = np.argsort(scores)[::-1]
+        else:
+            top_idx = np.argpartition(scores, -k)[-k:]
+            ranking_indices = top_idx[np.argsort(scores[top_idx])[::-1]]
+
+        top_k_ids = candidate_ids[ranking_indices][:k]
+        relevance = [1.0 if release_id in test_items else 0.0 for release_id in top_k_ids]
+
+        ndcg_scores.append(app_metrics.normalized_discounted_cumulative_gain(relevance))
+        evaluated_users += 1
+
+    if not ndcg_scores:
+        return 0.0, 0
+
+    return float(sum(ndcg_scores) / len(ndcg_scores)), evaluated_users
 
 
 def train_model(
@@ -602,73 +881,95 @@ def train_model(
     epochs: int = 10,
     batch_size: int = 1024,
     learning_rate: float = 0.001,
+    positive_class_weight: float = 1.0,
+    checkpoint_path: Path | None = None,
 ) -> keras.callbacks.History:
-    """Train the Two Towers model.
+    """Train the Two Towers model with binary cross-entropy."""
 
-    Args:
-        model: Combined Two Towers model
-        train_data: Training data dictionary
-        val_data: Validation data dictionary (optional)
-        epochs: Number of training epochs
-        batch_size: Batch size
-        learning_rate: Learning rate
-
-    Returns:
-        Training history
-    """
     LOGGER.info("Compiling model...")
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-        loss="mse",
-        metrics=["mae"],
+        loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="binary_accuracy", threshold=0.0),
+            keras.metrics.AUC(name="auc"),
+        ],
     )
 
+    monitor_metric = "val_auc" if val_data is not None else "auc"
     callbacks = [
         keras.callbacks.EarlyStopping(
-            monitor="val_loss" if val_data else "loss",
-            patience=3,
+            monitor=monitor_metric,
+            patience=4,
             restore_best_weights=True,
+            mode="max",
             verbose=1,
         ),
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss" if val_data else "loss",
-            patience=2,
+            monitor=monitor_metric,
+            patience=3,
             factor=0.5,
             min_lr=1e-6,
+            mode="max",
             verbose=1,
         ),
     ]
 
+    if checkpoint_path is not None:
+        checkpoint_path = checkpoint_path.expanduser()
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        callbacks.append(
+            keras.callbacks.ModelCheckpoint(
+                filepath=str(checkpoint_path),
+                monitor=monitor_metric,
+                mode="max",
+                save_best_only=True,
+                save_weights_only=True,
+                verbose=1,
+            )
+        )
+
+    positive_weight = max(1.0, positive_class_weight)
+    class_weight = {0: 1.0, 1: positive_weight}
+
     LOGGER.info("Training model (epochs=%d, batch_size=%d)...", epochs, batch_size)
     start = perf_counter()
 
+    train_inputs = [
+        train_data["user_id_idx"],
+        train_data["user_role"],
+        train_data["user_numeric"],
+        train_data["item_id_idx"],
+        train_data["item_artist"],
+        train_data["item_type"],
+        train_data["item_genres"],
+        train_data["item_numeric"],
+    ]
+
+    if val_data:
+        val_inputs = [
+            val_data["user_id_idx"],
+            val_data["user_role"],
+            val_data["user_numeric"],
+            val_data["item_id_idx"],
+            val_data["item_artist"],
+            val_data["item_type"],
+            val_data["item_genres"],
+            val_data["item_numeric"],
+        ]
+        validation = (val_inputs, val_data["labels"])
+    else:
+        validation = None
+
     history = model.fit(
-        x=[
-            train_data["user_role"],
-            train_data["user_numeric"],
-            train_data["item_artist"],
-            train_data["item_type"],
-            train_data["item_genres"],
-            train_data["item_numeric"],
-        ],
-        y=train_data["ratings"],
+        x=train_inputs,
+        y=train_data["labels"],
         epochs=epochs,
         batch_size=batch_size,
-        validation_data=(
-            [
-                val_data["user_role"],
-                val_data["user_numeric"],
-                val_data["item_artist"],
-                val_data["item_type"],
-                val_data["item_genres"],
-                val_data["item_numeric"],
-            ],
-            val_data["ratings"],
-        )
-        if val_data
-        else None,
+        validation_data=validation,
         callbacks=callbacks,
         verbose=1,
+        class_weight=class_weight,
     )
 
     elapsed = perf_counter() - start
@@ -684,11 +985,15 @@ def save_embeddings(
     user_ids: List[str],
     release_ids: List[int],
     user_features: Dict[str, Dict[str, float | int]],
-    item_features: Dict[int, Dict[str, float | int | List[int]]],
+    item_features: Dict[int, Dict[str, Any]],
     artist_to_idx: Dict[int, int],
+    user_to_idx: Dict[str, int],
+    release_to_idx: Dict[int, int],
     embedding_dim: int,
     model_version: str = "1.0",
     max_genres: int = 10,
+    num_negatives: int = 4,
+    random_seed: int = 2024,
 ) -> None:
     """Save embeddings to database.
 
@@ -735,6 +1040,9 @@ def save_embeddings(
         batch_user_ids = user_ids[i : i + batch_size]
         batch_user_features = [user_features[uid] for uid in batch_user_ids]
 
+        user_idx_batch = np.array(
+            [user_to_idx.get(uid, 0) for uid in batch_user_ids], dtype=np.int32
+        )
         user_roles_batch = np.array([uf["role_idx"] for uf in batch_user_features], dtype=np.int32)
         user_numeric_batch = np.array(
             [
@@ -751,7 +1059,9 @@ def save_embeddings(
         )
 
         embeddings = user_tower.predict(
-            [user_roles_batch, user_numeric_batch], verbose=0, batch_size=batch_size
+            [user_idx_batch, user_roles_batch, user_numeric_batch],
+            verbose=0,
+            batch_size=batch_size,
         )
 
         # Validate that we got the expected number of embeddings
@@ -793,8 +1103,11 @@ def save_embeddings(
         batch_release_ids = release_ids[i : i + batch_size]
         batch_item_features = [item_features[rid] for rid in batch_release_ids]
 
+        item_id_batch = np.array(
+            [release_to_idx.get(rid, 0) for rid in batch_release_ids], dtype=np.int32
+        )
         item_artists_batch = np.array(
-            [artist_to_idx.get(if_["artist_id"], 0) for if_ in batch_item_features],
+            [artist_to_idx.get(int(if_["artist_id"]), 0) for if_ in batch_item_features],
             dtype=np.int32,
         )
         item_types_batch = np.array(
@@ -804,7 +1117,8 @@ def save_embeddings(
         # Prepare genres (pad/truncate)
         item_genres_batch_list = []
         for if_ in batch_item_features:
-            genre_ids = if_["genre_ids"]
+            raw_genres = if_.get("genre_ids", [])
+            genre_ids = raw_genres if isinstance(raw_genres, list) else []
             if len(genre_ids) > max_genres:
                 genre_ids = genre_ids[:max_genres]
             elif len(genre_ids) < max_genres:
@@ -825,7 +1139,13 @@ def save_embeddings(
         )
 
         embeddings = item_tower.predict(
-            [item_artists_batch, item_types_batch, item_genres_batch, item_numeric_batch],
+            [
+                item_id_batch,
+                item_artists_batch,
+                item_types_batch,
+                item_genres_batch,
+                item_numeric_batch,
+            ],
             verbose=0,
             batch_size=batch_size,
         )
@@ -883,6 +1203,16 @@ def build_embeddings(
     min_release_ratings: int = 3,
     sample_size: int | None = None,
     validation_split: float = 0.2,
+    num_negatives: int = 4,
+    max_genres: int = 10,
+    random_seed: int = 2024,
+    evaluate_ndcg: bool = False,
+    ndcg_holdout_fraction: float = 0.2,
+    ndcg_k: int = 9,
+    ndcg_min_test_items: int = 1,
+    ndcg_max_users: int | None = None,
+    checkpoint_path: Path | None = None,
+    resume_from_checkpoint: Path | None = None,
 ) -> None:
     """Main function to build and save Two Towers embeddings."""
     if tf is None or keras is None:
@@ -898,6 +1228,7 @@ def build_embeddings(
         user_to_idx,
         release_to_idx,
         artist_to_idx,
+        genre_to_idx,
         num_artists,
         num_genres,
     ) = load_training_data(
@@ -911,16 +1242,51 @@ def build_embeddings(
     if not interactions:
         raise ValueError("No interactions found for training")
 
+    training_interactions = interactions
+    ndcg_holdout_items: Dict[str, set[int]] = {}
+    if evaluate_ndcg:
+        training_interactions, ndcg_holdout_items = split_interactions_for_ndcg(
+            interactions,
+            holdout_fraction=ndcg_holdout_fraction,
+            min_test_items=ndcg_min_test_items,
+            seed=random_seed,
+        )
+        total_holdout = sum(len(items) for items in ndcg_holdout_items.values())
+        LOGGER.info(
+            "Reserved %d holdout interactions across %d users for NDCG (fraction=%.2f)",
+            total_holdout,
+            len(ndcg_holdout_items),
+            ndcg_holdout_fraction,
+        )
+
+        if not training_interactions:
+            raise ValueError(
+                "All interactions ended up in the holdout set. Lower ndcg_holdout_fraction."
+            )
+
+    train_positive_lookup = build_positive_lookup(training_interactions)
+
     # Build model
+    num_roles = 10  # Fixed: 0-9 role indices
+    num_users = len(user_to_idx) + 1  # Reserve 0 for unknown
+    num_releases = len(release_to_idx) + 1
+
     LOGGER.info(
-        "Building Two Towers model (embedding_dim=%d, num_artists=%d, num_genres=%d)...",
+        (
+            "Building Two Towers model "
+            "(embedding_dim=%d, num_users=%d, num_releases=%d, "
+            "num_artists=%d, num_genres=%d)..."
+        ),
         embedding_dim,
+        num_users,
+        num_releases,
         num_artists,
         num_genres,
     )
-    num_roles = 10  # Fixed: 0-9 role indices
     combined_model, user_tower, item_tower = build_two_tower_model(
+        num_users=num_users,
         num_roles=num_roles,
+        num_releases=num_releases,
         num_artists=num_artists,
         num_genres=num_genres,
         embedding_dim=embedding_dim,
@@ -929,16 +1295,44 @@ def build_embeddings(
     LOGGER.info("Model architecture:")
     combined_model.summary()
 
+    if resume_from_checkpoint is not None:
+        resume_path = resume_from_checkpoint.expanduser()
+        if resume_path.exists():
+            try:
+                LOGGER.info("Loading weights from checkpoint: %s", resume_path)
+                combined_model.load_weights(str(resume_path))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "Unable to load checkpoint %s (%s). Continuing from scratch.",
+                    resume_path,
+                    exc,
+                )
+        else:
+            LOGGER.warning("Resume checkpoint not found: %s", resume_path)
+
     # Prepare training data
-    LOGGER.info("Preparing training data...")
-    all_data = prepare_batch_data(interactions, user_features, item_features, artist_to_idx)
+    LOGGER.info("Preparing training data (negatives por positivo=%d)...", num_negatives)
+    release_ids = sorted(release_to_idx.keys())
+    all_data = prepare_batch_data(
+        training_interactions,
+        user_features,
+        item_features,
+        user_to_idx,
+        release_to_idx,
+        artist_to_idx,
+        release_ids,
+        num_negatives=num_negatives,
+        max_genres=max_genres,
+        seed=random_seed,
+    )
 
     # Split train/val
-    n_train = int(len(interactions) * (1 - validation_split))
+    total_samples = all_data["labels"].shape[0]
+    n_train = int(total_samples * (1 - validation_split))
     train_data = {key: val[:n_train] for key, val in all_data.items()}
     val_data = {key: val[n_train:] for key, val in all_data.items()}
 
-    LOGGER.info("Train samples: %d, Val samples: %d", n_train, len(interactions) - n_train)
+    LOGGER.info("Train samples: %d, Val samples: %d", n_train, total_samples - n_train)
 
     # Train model
     train_model(
@@ -948,6 +1342,8 @@ def build_embeddings(
         epochs=epochs,
         batch_size=batch_size,
         learning_rate=learning_rate,
+        positive_class_weight=float(num_negatives),
+        checkpoint_path=checkpoint_path,
     )
 
     # Save embeddings
@@ -963,13 +1359,52 @@ def build_embeddings(
         user_features,
         item_features,
         artist_to_idx,
+        user_to_idx,
+        release_to_idx,
         embedding_dim,
         model_version="1.0",
+        max_genres=max_genres,
+        num_negatives=num_negatives,
+        random_seed=random_seed,
     )
 
+    evaluation_summary: Dict[str, Any] | None = None
+    if evaluate_ndcg:
+        try:
+            ndcg_score, evaluated_users = evaluate_two_tower_ndcg(
+                user_tower=user_tower,
+                item_tower=item_tower,
+                user_features=user_features,
+                item_features=item_features,
+                user_to_idx=user_to_idx,
+                release_to_idx=release_to_idx,
+                artist_to_idx=artist_to_idx,
+                train_positive_items=train_positive_lookup,
+                holdout_items=ndcg_holdout_items,
+                max_genres=max_genres,
+                k=ndcg_k,
+                max_users=ndcg_max_users,
+            )
+            LOGGER.info(
+                "Two Towers validation NDCG@%d = %.4f (%d usuarios)",
+                ndcg_k,
+                ndcg_score,
+                evaluated_users,
+            )
+            evaluation_summary = {
+                "ndcg_k": ndcg_k,
+                "ndcg_score": ndcg_score,
+                "evaluated_users": evaluated_users,
+                "holdout_fraction": ndcg_holdout_fraction,
+                "min_test_items": ndcg_min_test_items,
+                "max_users": ndcg_max_users,
+            }
+        except ImportError as exc:
+            LOGGER.warning("Skipping NDCG evaluation: %s", exc)
+
     # Save model for later use in generating new user embeddings
-    models_dir = Path(__file__).resolve().parents[1] / "models"
-    models_dir.mkdir(exist_ok=True)
+    models_dir = Path(__file__).resolve().parents[1] / "models" / "Two Towers"
+    models_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine model filename based on database
     # Try to get database path from connection
@@ -985,40 +1420,76 @@ def build_embeddings(
         db_path = resolve_database_path(None)
 
     db_name = db_path.stem  # e.g., "sputnik" or "sputnik_lite"
-    model_path = models_dir / f"user_tower_{db_name}.keras"
-    metadata_path = models_dir / f"user_tower_{db_name}_metadata.json"
+    user_model_path = models_dir / f"user_tower_{db_name}.keras"
+    item_model_path = models_dir / f"item_tower_{db_name}.keras"
+    metadata_path = models_dir / f"two_towers_{db_name}_metadata.json"
 
-    LOGGER.info("Saving user tower model to %s", model_path)
-    # Guardar con formato SavedModel para mejor compatibilidad con Lambda layers
-    try:
-        user_tower.save(str(model_path), save_format="keras")
-    except Exception as e:
-        LOGGER.warning("Error guardando con formato keras, intentando SavedModel: %s", e)
-        # Fallback: guardar como SavedModel
-        saved_model_path = models_dir / f"user_tower_{db_name}_savedmodel"
-        user_tower.save(str(saved_model_path), save_format="tf")
-        # También guardar como keras para compatibilidad
-        import shutil
+    def save_model_artifact(model: keras.Model, target_path: Path, label: str) -> None:
+        LOGGER.info("Saving %s model to %s", label, target_path)
+        try:
+            model.save(str(target_path), save_format="keras")
+        except Exception as exc:  # pragma: no cover - fallback path
+            LOGGER.warning(
+                "Error guardando %s en formato keras (%s), intentando SavedModel", label, exc
+            )
+            fallback_path = target_path.parent / f"{target_path.stem}_savedmodel"
+            model.save(str(fallback_path), save_format="tf")
+            import shutil
 
-        shutil.copy(str(saved_model_path / "saved_model.pb"), str(model_path))
+            shutil.copy(str(fallback_path / "saved_model.pb"), str(target_path))
 
-    # Save metadata needed to use the model
-    # Note: database path is stored for reference only, not used for loading
+    save_model_artifact(user_tower, user_model_path, "user tower")
+    save_model_artifact(item_tower, item_model_path, "item tower")
+
+    # Persist vocabularies for reproducible inference
+    user_index_path = models_dir / f"two_towers_{db_name}_user_index.json"
+    release_index_path = models_dir / f"two_towers_{db_name}_release_index.json"
+    artist_index_path = models_dir / f"two_towers_{db_name}_artist_index.json"
+    genre_index_path = models_dir / f"two_towers_{db_name}_genre_index.json"
+
+    index_payloads = [
+        (user_index_path, user_to_idx),
+        (release_index_path, release_to_idx),
+        (artist_index_path, artist_to_idx),
+        (genre_index_path, genre_to_idx),
+    ]
+    for path, mapping in index_payloads:
+        with open(path, "w") as f:
+            json.dump(mapping, f)
+
     metadata = {
+        "model_version": "1.0",
         "embedding_dim": embedding_dim,
         "num_roles": num_roles,
+        "num_users": num_users,
+        "num_releases": num_releases,
         "num_artists": num_artists,
         "num_genres": num_genres,
-        "model_version": "1.0",
-        "database_name": db_name,  # Use name instead of full path for portability
-        "database_path": str(db_path),  # Kept for reference/debugging
+        "max_genres": max_genres,
+        "num_negatives": num_negatives,
+        "random_seed": random_seed,
+        "database_name": db_name,
+        "database_path": str(db_path),
         "saved_at": datetime.utcnow().isoformat(),
+        "artifacts": {
+            "user_tower": str(user_model_path),
+            "item_tower": str(item_model_path),
+        },
+        "vocabularies": {
+            "user_to_idx": str(user_index_path),
+            "release_to_idx": str(release_index_path),
+            "artist_to_idx": str(artist_index_path),
+            "genre_to_idx": str(genre_index_path),
+        },
     }
+
+    if evaluation_summary:
+        metadata["evaluation"] = evaluation_summary
 
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    LOGGER.info("Model and metadata saved successfully")
+    LOGGER.info("Modelos y metadatos guardados en %s", metadata_path)
 
     LOGGER.info("Total time: %.2fs", perf_counter() - total_start)
 
@@ -1092,6 +1563,66 @@ def parse_arguments(argv: List[str] | None = None) -> argparse.Namespace:
         help="Fraction of data to use for validation (default: 0.2)",
     )
     parser.add_argument(
+        "--num-negatives",
+        type=int,
+        default=4,
+        help="Negative samples por interacción positiva (default: 4)",
+    )
+    parser.add_argument(
+        "--max-genres",
+        type=int,
+        default=10,
+        help="Cantidad máxima de géneros por release para el embedding (default: 10)",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=2024,
+        help="Semilla para muestreo y shuffles (default: 2024)",
+    )
+    parser.add_argument(
+        "--evaluate-ndcg",
+        action="store_true",
+        help="Reserva un holdout por usuario y calcula NDCG@k al finalizar el entrenamiento",
+    )
+    parser.add_argument(
+        "--ndcg-holdout",
+        type=float,
+        default=0.2,
+        help="Fracción de interacciones positivas reservadas por usuario para NDCG (default: 0.2)",
+    )
+    parser.add_argument(
+        "--ndcg-k",
+        type=int,
+        default=9,
+        help="Valor de k para NDCG@k (default: 9)",
+    )
+    parser.add_argument(
+        "--ndcg-min-test-items",
+        type=int,
+        default=1,
+        help="Mínimo de ítems en holdout por usuario para incluirlo en la métrica (default: 1)",
+    )
+    parser.add_argument(
+        "--ndcg-max-users",
+        type=int,
+        default=None,
+        help="Límite máximo de usuarios evaluados para acelerar la métrica (default: todos)",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        help=(
+            "Ruta donde guardar pesos (save_weights) en cada epoch. "
+            "Si no se indica, no se generan checkpoints."
+        ),
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        help="Ruta de pesos guardados previamente para reanudar entrenamiento",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -1117,6 +1648,14 @@ def main(argv: List[str] | None = None) -> int:
         connection.execute("PRAGMA journal_mode = WAL;")
 
         try:
+            checkpoint_path = (
+                Path(args.checkpoint_path).expanduser() if args.checkpoint_path else None
+            )
+            resume_from_checkpoint = (
+                Path(args.resume_from_checkpoint).expanduser()
+                if args.resume_from_checkpoint
+                else None
+            )
             build_embeddings(
                 connection,
                 min_rating=args.min_rating,
@@ -1128,6 +1667,16 @@ def main(argv: List[str] | None = None) -> int:
                 min_release_ratings=args.min_release_ratings,
                 sample_size=args.sample_size,
                 validation_split=args.validation_split,
+                num_negatives=args.num_negatives,
+                max_genres=args.max_genres,
+                random_seed=args.random_seed,
+                evaluate_ndcg=args.evaluate_ndcg,
+                ndcg_holdout_fraction=args.ndcg_holdout,
+                ndcg_k=args.ndcg_k,
+                ndcg_min_test_items=args.ndcg_min_test_items,
+                ndcg_max_users=args.ndcg_max_users,
+                checkpoint_path=checkpoint_path,
+                resume_from_checkpoint=resume_from_checkpoint,
             )
         except Exception as e:
             LOGGER.exception("Error building embeddings: %s", e)

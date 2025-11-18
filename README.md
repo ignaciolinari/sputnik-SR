@@ -335,13 +335,24 @@ El sistema de recomendaciones avanzadas requiere embeddings de NMF y Two Towers.
 
     ```bash
     python offline_recommender/build_two_towers.py \
-        --database data/sputnik.db \
-        --embedding-dim 64 \
-        --epochs 10 \
-        --batch-size 1024 \
-        --min-user-ratings 5 \
-        --min-release-ratings 3
+      --database data/sputnik.db \
+      --embedding-dim 64 \
+      --epochs 10 \
+      --batch-size 1024 \
+      --min-user-ratings 5 \
+      --min-release-ratings 3 \
+      --num-negatives 4 \
+      --max-genres 10 \
+      --random-seed 2024 \
+      --evaluate-ndcg \
+      --ndcg-holdout 0.2 \
+      --ndcg-k 9
     ```
+
+- El script ahora combina embeddings específicos de usuario/release con features auxiliares y genera negativos por usuario para optimizar una pérdida binaria con in-batch hard negatives.
+- Se serializan ambos towers (`models/user_tower_<db>.keras` e `item_tower_<db>.keras`) junto con los vocabularios (`two_towers_*_index.json`). Estos archivos son necesarios si querés recalcular embeddings fuera del pipeline offline.
+- Con `--evaluate-ndcg` el script reserva interacciones por usuario para un holdout, calcula NDCG@k automáticamente y agrega el resultado en `models/Two Towers/two_towers_<db>_metadata.json` (incluye `k`, usuarios evaluados, fracción de holdout y score promedio). Así podés trackear avances igual que en `build_nmf_embeddings.py` sin lanzar `evaluate_recommender.py` aparte.
+- Uso prolongado: con datasets completos (8M+ interacciones) el entrenamiento puede tomar 3-6 horas en CPU. Para proteger ese tiempo podés activar checkpoints incrementales con `--checkpoint-path models/Two Towers/checkpoints/two_towers.weights.h5` y, si la corrida se corta, reanudar con `--resume-from-checkpoint` apuntando al mismo archivo. El callback guarda los mejores pesos tras cada epoch (incluye optimizador), por lo que la siguiente ejecución continúa donde quedó sin perder el historial.
 
 **Nota**: Los embeddings de releases deben reconstruirse periódicamente cuando haya nuevas interacciones en el sistema (típicamente semanal). Los usuarios pueden actualizar sus embeddings individuales en cualquier momento desde la interfaz web.
 
