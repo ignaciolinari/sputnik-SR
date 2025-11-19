@@ -20,3 +20,4 @@ vintage/
 .evaluate_recommender.lock
 .experiment_two_towers.lock
 checkpoints/
+results/

@@ -936,16 +936,8 @@ def evaluate(
                     total_results,
                 )
 
-                # Escribir resultados incrementalmente después de cada chunk
-                if output and chunk_result:
-                    if fieldnames is None:
-                        fieldnames = list(chunk_result[0].keys())
-                    write_results_incremental(
-                        output,
-                        chunk_result,
-                        fieldnames,
-                        append=(completed_chunks > 1 or output.exists()),
-                    )
+                # Los resultados ya fueron escritos por los workers usando write_results_with_lock
+                # No necesitamos escribirlos de nuevo aquí para evitar duplicados
 
         # Aplanar resultados
         results = [result for chunk_result in chunk_results for result in chunk_result]
@@ -963,20 +955,12 @@ def evaluate(
             except Exception:
                 pass
 
-        for chunk_idx, args in enumerate(chunk_args, 1):
+        for _chunk_idx, args in enumerate(chunk_args, 1):
             chunk_results = _evaluate_user_chunk(args)
             results.extend(chunk_results)
 
-            # Escribir resultados incrementalmente después de cada chunk
-            if output and chunk_results:
-                if fieldnames is None:
-                    fieldnames = list(chunk_results[0].keys())
-                write_results_incremental(
-                    output,
-                    chunk_results,
-                    fieldnames,
-                    append=(chunk_idx > 1 or output.exists()),
-                )
+            # Los resultados ya fueron escritos por _evaluate_user_chunk
+            # No necesitamos escribirlos de nuevo aquí
 
             # Logging progreso
             LOGGER.info(
