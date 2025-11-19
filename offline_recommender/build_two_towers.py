@@ -375,20 +375,10 @@ def build_two_tower_model(
     # Dot product (score) - embeddings are L2 normalized, so dot product is in [-1, 1]
     dot_score = layers.Dot(axes=1, normalize=False, name="dot_score")([user_emb, item_emb])
 
-    # Expand dimensions for Dense layer: (batch_size,) -> (batch_size, 1)
-    dot_score_expanded = layers.Reshape((1,), name="dot_score_reshape")(dot_score)
-
     # Map dot product [-1, 1] to rating range using a learned transformation
     # Add bias and scale to learn the mapping from similarity to rating
-    score_dense = layers.Dense(1, activation=None, use_bias=True, name="score_dense")(
-        dot_score_expanded
-    )
-
-    # Flatten back to (batch_size,) by squeezing the last dimension
-    def squeeze_score(x):
-        return tf.squeeze(x, axis=-1)
-
-    score = layers.Lambda(squeeze_score, output_shape=(1,), name="score")(score_dense)
+    # Output shape: (batch_size, 1)
+    score = layers.Dense(1, activation=None, use_bias=True, name="score")(dot_score)
 
     combined_model = keras.Model(
         inputs=[
@@ -662,7 +652,7 @@ def prepare_batch_data(
         "item_type": np.array(batch_data["item_type"], dtype=np.int32),
         "item_genres": np.array(batch_data["item_genres"], dtype=np.int32),
         "item_numeric": np.array(batch_data["item_numeric"], dtype=np.float32),
-        "labels": np.array(batch_data["labels"], dtype=np.float32),
+        "labels": np.array(batch_data["labels"], dtype=np.float32).reshape(-1, 1),
     }
 
     # Shuffle to avoid ordering effects
@@ -968,7 +958,7 @@ def train_model(
         batch_size=batch_size,
         validation_data=validation,
         callbacks=callbacks,
-        verbose=1,
+        verbose=2,
         class_weight=class_weight,
     )
 

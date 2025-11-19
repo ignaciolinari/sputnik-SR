@@ -1,0 +1,33 @@
+{
+  "model_version": "1.0",
+  "embedding_dim": 32,
+  "num_roles": 10,
+  "num_users": 43195,
+  "num_releases": 149572,
+  "num_artists": 47694,
+  "num_genres": 98,
+  "max_genres": 10,
+  "num_negatives": 2,
+  "random_seed": 2024,
+  "database_name": "sputnik",
+  "database_path": "/kaggle/working/sputnik-SR/data/sputnik.db",
+  "saved_at": "2025-11-19T02:00:12.384291",
+  "artifacts": {
+    "user_tower": "/kaggle/working/sputnik-SR/models/Two Towers/user_tower_sputnik.keras",
+    "item_tower": "/kaggle/working/sputnik-SR/models/Two Towers/item_tower_sputnik.keras"
+  },
+  "vocabularies": {
+    "user_to_idx": "/kaggle/working/sputnik-SR/models/Two Towers/two_towers_sputnik_user_index.json",
+    "release_to_idx": "/kaggle/working/sputnik-SR/models/Two Towers/two_towers_sputnik_release_index.json",
+    "artist_to_idx": "/kaggle/working/sputnik-SR/models/Two Towers/two_towers_sputnik_artist_index.json",
+    "genre_to_idx": "/kaggle/working/sputnik-SR/models/Two Towers/two_towers_sputnik_genre_index.json"
+  },
+  "evaluation": {
+    "ndcg_k": 9,
+    "ndcg_score": 0.21775993524715648,
+    "evaluated_users": 500,
+    "holdout_fraction": 0.2,
+    "min_test_items": 1,
+    "max_users": 500
+  }
+}
