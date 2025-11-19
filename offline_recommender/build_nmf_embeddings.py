@@ -457,6 +457,11 @@ def evaluate_nmf_ndcg(
         return 0.0
 
     # Evaluate NDCG@k for each user
+    # Pre-normalize all embeddings for faster cosine similarity computation
+    item_norms = np.linalg.norm(item_embeddings, axis=1)
+    item_norms[item_norms == 0] = 1  # Avoid division by zero
+    item_embeddings_normalized = item_embeddings / item_norms[:, np.newaxis]
+
     ndcg_scores = []
     for user_idx in valid_users:
         # Get user embedding
@@ -465,6 +470,9 @@ def evaluate_nmf_ndcg(
 
         if user_norm == 0:
             continue
+
+        # Normalize user embedding
+        user_emb_normalized = user_emb / user_norm
 
         # Get test items for this user
         test_item_indices = user_test_items[user_idx]
@@ -479,18 +487,13 @@ def evaluate_nmf_ndcg(
         if not candidate_items:
             continue
 
-        # Calculate similarities
-        similarities = {}
-        for item_idx in candidate_items:
-            item_emb = item_embeddings[item_idx]
-            item_norm = np.linalg.norm(item_emb)
-            if item_norm > 0:
-                similarity = np.dot(user_emb, item_emb) / (user_norm * item_norm)
-                similarities[item_idx] = float(similarity)
+        # Vectorized similarity calculation (MUCH faster than loop)
+        candidate_embeddings = item_embeddings_normalized[candidate_items]
+        similarities = np.dot(candidate_embeddings, user_emb_normalized)
 
         # Get top-k recommendations
-        ranked_items = sorted(similarities.items(), key=lambda x: x[1], reverse=True)
-        top_k_indices = [item_idx for item_idx, _ in ranked_items[:k]]
+        top_k_idx = np.argsort(similarities)[-k:][::-1]
+        top_k_indices = [candidate_items[idx] for idx in top_k_idx]
 
         # Calculate relevance scores (1.0 if in test set, 0.0 otherwise)
         relevance_scores = [
@@ -676,11 +679,24 @@ def optimize_hyperparameters(
 
     # Split data for evaluation
     # For sparse matrices, we need to split by users
+    # Use smaller test set during optimization to speed up evaluation (20% instead of default)
     n_users = matrix.shape[0]
     indices = np.arange(n_users)
     train_indices, test_indices = train_test_split(
         indices, test_size=test_size, random_state=random_state
     )
+
+    # During optimization, optionally subsample test set for faster evaluation
+    # This trades some accuracy for much faster optimization
+    if metric == "ndcg" and len(test_indices) > 500:
+        # Sample max 500 test users for NDCG evaluation (much faster)
+        # This is enough for reliable optimization while being 5-10x faster
+        np.random.seed(random_state)
+        test_indices = np.random.choice(test_indices, size=500, replace=False)
+        LOGGER.info(
+            "Subsampled test set to 500 users for faster optimization "
+            "(full evaluation will use all data)"
+        )
 
     train_matrix = matrix[train_indices, :]
     test_matrix = matrix[test_indices, :]
@@ -695,12 +711,17 @@ def optimize_hyperparameters(
     )
 
     # Define search space
+    # Updated ranges for better NMF performance based on analysis:
+    # - n_components: [30, 100] instead of [10, 100] (11 was too low)
+    # - max_iter: [50, 800] instead of [50, 500] (more components need more iterations)
+    # - alpha_W/alpha_H: [1e-5, 1e-2] instead of [1e-5, 1e-1] (0.082 was too high)
+    # - l1_ratio: [0.0, 0.5] instead of [0.0, 1.0] (0.72 caused too much sparsity)
     dimensions = [
-        Integer(10, 100, name="n_components"),
-        Integer(50, 500, name="max_iter"),
-        Real(1e-5, 1e-1, prior="log-uniform", name="alpha_W"),
-        Real(1e-5, 1e-1, prior="log-uniform", name="alpha_H"),
-        Real(0.0, 1.0, name="l1_ratio"),
+        Integer(30, 100, name="n_components"),  # Increased minimum from 10 to 30
+        Integer(50, 800, name="max_iter"),  # Increased maximum from 500 to 800 for convergence
+        Real(1e-5, 1e-2, prior="log-uniform", name="alpha_W"),  # Reduced maximum from 1e-1 to 1e-2
+        Real(1e-5, 1e-2, prior="log-uniform", name="alpha_H"),  # Reduced maximum from 1e-1 to 1e-2
+        Real(0.0, 0.5, name="l1_ratio"),  # Reduced maximum from 1.0 to 0.5
     ]
 
     # Objective function
@@ -732,9 +753,10 @@ def optimize_hyperparameters(
                 # score is NDCG (positive), we want to maximize it, so minimize -score
                 objective_value = -score
 
-            LOGGER.debug(
-                "Trial: n_components=%d, max_iter=%d, alpha_W=%.6f, alpha_H=%.6f, "
-                "l1_ratio=%.3f, %s=%.6f",
+            # Log at INFO level for visibility during optimization
+            LOGGER.info(
+                "Trial completed: n_components=%d, max_iter=%d, alpha_W=%.6f, alpha_H=%.6f, "
+                "l1_ratio=%.3f → %s=%.6f",
                 n_components,
                 max_iter,
                 alpha_W,
@@ -795,10 +817,13 @@ def optimize_hyperparameters(
 
                 dump(checkpoint_result, str(checkpoint_file))
                 current_total = len(merged_func_vals)
+                best_score_so_far = -best_fun if metric == "ndcg" else best_fun
                 LOGGER.info(
-                    "Checkpoint saved: %d/%d evaluations completed",
+                    "✓ Checkpoint saved: %d/%d evaluations completed (best %s so far: %.6f)",
                     current_total,
                     total_expected_calls,
+                    metric.upper(),
+                    best_score_so_far,
                 )
             except Exception as e:
                 LOGGER.warning("Failed to save checkpoint: %s", e)
