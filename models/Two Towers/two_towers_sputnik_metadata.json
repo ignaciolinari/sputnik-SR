@@ -7,11 +7,11 @@
   "num_artists": 47694,
   "num_genres": 98,
   "max_genres": 10,
-  "num_negatives": 2,
+  "num_negatives": 3,
   "random_seed": 2024,
   "database_name": "sputnik",
   "database_path": "/kaggle/working/sputnik-SR/data/sputnik.db",
-  "saved_at": "2025-11-19T02:00:12.384291",
+  "saved_at": "2025-11-19T03:56:07.603340",
   "artifacts": {
     "user_tower": "/kaggle/working/sputnik-SR/models/Two Towers/user_tower_sputnik.keras",
     "item_tower": "/kaggle/working/sputnik-SR/models/Two Towers/item_tower_sputnik.keras"
@@ -24,7 +24,7 @@
   },
   "evaluation": {
     "ndcg_k": 9,
-    "ndcg_score": 0.21775993524715648,
+    "ndcg_score": 0.22807890101831513,
     "evaluated_users": 500,
     "holdout_fraction": 0.2,
     "min_test_items": 1,
