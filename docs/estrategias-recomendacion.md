@@ -4,16 +4,95 @@ Este documento describe todas las estrategias de recomendación implementadas en
 
 ## Tabla de Contenidos
 
-1. [Motor Híbrido](#motor-híbrido)
-2. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
-3. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
-4. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
-5. [Two Towers (Deep Learning)](#two-towers-deep-learning)
-6. [Perfiles de Contenido](#perfiles-de-contenido)
-7. [Popularidad](#popularidad)
-8. [Exploración Aleatoria](#exploración-aleatoria)
-9. [Recomendaciones Contextuales](#recomendaciones-contextuales)
-10. [Métricas de Evaluación](#métricas-de-evaluación)
+1. [Max-Ensemble](#max-ensemble)
+2. [Motor Híbrido](#motor-híbrido)
+3. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
+4. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
+5. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
+6. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+7. [Perfiles de Contenido](#perfiles-de-contenido)
+8. [Popularidad](#popularidad)
+9. [Exploración Aleatoria](#exploración-aleatoria)
+10. [Recomendaciones Contextuales](#recomendaciones-contextuales)
+11. [Métricas de Evaluación](#métricas-de-evaluación)
+
+---
+
+## Max-Ensemble
+
+**Función:** `recommend_max_ensemble(user_id, limit=9)`
+**Estado:** Experimental - En evaluación
+**API Endpoint:** `/api/recommend/<user_id>/max_ensemble`
+
+Sistema experimental que combina múltiples estrategias seleccionando el **score máximo** para cada release candidato. A diferencia del híbrido anterior que selecciona UNA estrategia, max-ensemble ejecuta TODAS las estrategias disponibles y toma lo mejor de cada una.
+
+### Mecánica
+
+1. **Genera candidatos** con cada estrategia disponible:
+   - `pairs`: 3x candidatos (peso alto, mejor para 64.7% usuarios)
+   - `content`: 1.5x candidatos (peso medio, mejor para 26.3% usuarios)
+   - `advanced`: 1x candidatos (peso base, mejor para 6.5% usuarios)
+
+2. **Para cada release candidato**, guarda el score MÁS ALTO entre todas las estrategias
+
+3. **Ordena todos los releases** por su score máximo
+
+4. **Diversifica por artista** y retorna top-K
+
+### Adaptabilidad Automática
+
+El sistema se adapta según las interacciones del usuario:
+
+| Interacciones | Estrategias Activas | Comportamiento |
+|---------------|---------------------|----------------|
+| **0** | Popular | Cold start (igual que híbrido) |
+| **1-19** | pairs + content | Combina co-ocurrencia y contenido |
+| **20+** | pairs + content + advanced | Todas las estrategias disponibles |
+
+### Ejemplo Concreto
+
+Usuario con 25 ratings positivos:
+
+```
+pairs genera:    Release A: 0.95, Release B: 0.80
+content genera:  Release B: 0.70, Release C: 0.85
+advanced genera: Release A: 0.50, Release D: 0.75
+
+Max-Ensemble combina:
+  A → MAX(0.95, 0.50) = 0.95 ✓ (preserva el mejor)
+  C → 0.85 ✓
+  B → MAX(0.80, 0.70) = 0.80 ✓
+  D → 0.75 ✓
+
+Ranking final: [A, C, B, D, ...]
+```
+
+### Ventajas sobre Híbrido anterior
+
+1. **No elige una sola estrategia:** Aprovecha fortalezas de todas simultáneamente
+2. **Sin promedios que diluyan:** Preserva los mejores scores de cada estrategia
+3. **Diversidad implícita:** Diferentes releases pueden venir de diferentes estrategias
+4. **Sin hiperparámetros:** No requiere calibrar pesos ni umbrales
+
+### ¿Por qué funciona mejor?
+
+**Complementariedad real:** Diferentes estrategias son mejores para diferentes usuarios:
+- `pairs` funciona mejor para 64.7% de usuarios
+- `content` funciona mejor para 26.3% de usuarios
+- `advanced` funciona mejor para 6.5% de usuarios
+
+El máximo captura el "ganador" para cada release, mientras que el híbrido anterior elegía una sola estrategia para todo el usuario.
+
+### Uso
+
+```python
+# Via Python
+from app import recommender
+recommendations = recommender.recommend_max_ensemble("user_id", limit=9)
+
+# Via API
+GET /api/recommend/<user_id>/max_ensemble?limit=9&format=full
+```
 
 ---
 

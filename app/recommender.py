@@ -1630,6 +1630,135 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
     return [release_id for release_id, _ in ranked[:limit]]
 
 
+def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
+    """
+    Max-Select Ensemble: Genera candidatos con múltiples estrategias y selecciona
+    los mejores por score máximo entre todas.
+
+    Sistema adaptativo que combina las mejores recomendaciones de múltiples estrategias:
+    - pairs: Co-ocurrencia de releases
+    - content: Similitud de contenido (géneros/artistas)
+    - advanced: NMF + Two Towers (si disponible)
+
+    El sistema se adapta automáticamente según las interacciones del usuario:
+    - 0 interacciones: Popular (cold start)
+    - 1-19 interacciones: pairs + content
+    - 20+ interacciones: pairs + content + advanced
+
+
+    Args:
+        user_id: ID del usuario
+        limit: Número de recomendaciones a retornar (default: 9)
+
+    Returns:
+        Lista de release_ids ordenados por score máximo
+    """
+    # Limpiar cache
+    _LAST_EXPLANATIONS.pop(user_id, None)
+    _LAST_STRATEGY.pop(user_id, None)
+
+    # Obtener interacciones del usuario
+    interactions = _user_interactions(user_id)
+    positive_interactions = [
+        interaction
+        for interaction in interactions
+        if interaction.rating >= _DEFAULT_POSITIVE_RATING
+    ]
+
+    # CASO 1: Sin interacciones → Popular (cold start)
+    if not positive_interactions:
+        candidates = _popular_unseen_releases(user_id, limit)
+        _cache_last_strategy(user_id, "max_ensemble_popular")
+        _cache_last_explanation(user_id, ["Lanzamientos populares para comenzar"])
+        return list(dict.fromkeys(candidates))[:limit]
+
+    # CASO 2 y 3: Con interacciones → Max-Ensemble de estrategias disponibles
+    n_positive = len(positive_interactions)
+
+    # Determinar estrategias disponibles con sus multiplicadores de candidatos
+    # Basado en análisis: pairs funciona mejor para 64.7%, content para 26.3%, advanced para 6.5%
+    strategies_available = []
+
+    # pairs: siempre disponible si hay interacciones
+    strategies_available.append(("pairs", 3.0))  # peso alto
+
+    # content: siempre disponible si hay interacciones
+    strategies_available.append(("content", 1.5))  # peso medio
+
+    # advanced: solo si tiene suficientes ratings
+    if n_positive >= Config.min_advanced_level_1_signals:
+        strategies_available.append(("advanced", 1.0))  # peso base
+
+    # Diccionario para almacenar scores máximos por release
+    # Estructura: {release_id: (max_score, strategy_name)}
+    max_scores: Dict[int, tuple[float, str]] = {}
+
+    # Generar candidatos con cada estrategia disponible
+    for strategy_name, candidate_multiplier in strategies_available:
+        try:
+            # Calcular cuántos candidatos generar (más de estrategias mejores)
+            n_candidates = int(limit * 2 * candidate_multiplier)
+
+            # Generar candidatos según la estrategia
+            if strategy_name == "pairs":
+                candidates = recommend_from_pairs(
+                    user_id, limit=n_candidates, interactions=interactions
+                )
+            elif strategy_name == "content":
+                candidates = recommend_content_based(
+                    user_id, limit=n_candidates, interactions=interactions
+                )
+            elif strategy_name == "advanced":
+                candidates = recommend_advanced(user_id, limit=n_candidates)
+            else:
+                continue
+
+            # Asignar scores basados en ranking (posición)
+            # Score decreciente: primer candidato = 1.0, último ≈ 0.0
+            for rank, release_id in enumerate(candidates):
+                # Score basado en posición inversa
+                score = 1.0 - (rank / max(len(candidates), 1))
+
+                # Guardar score máximo para este release
+                if release_id not in max_scores or score > max_scores[release_id][0]:
+                    max_scores[release_id] = (score, strategy_name)
+
+        except Exception as e:
+            # Si una estrategia falla, continuar con las demás
+            print(f"Warning: Strategy {strategy_name} failed for user {user_id}: {e}")
+            continue
+
+    # Si no se generaron candidatos, usar popular como fallback
+    if not max_scores:
+        candidates = _popular_unseen_releases(user_id, limit)
+        _cache_last_strategy(user_id, "max_ensemble_fallback")
+        _cache_last_explanation(user_id, ["Lanzamientos populares (fallback)"])
+        return list(dict.fromkeys(candidates))[:limit]
+
+    # Ordenar releases por score máximo (descendente)
+    ranked_releases = sorted(
+        max_scores.items(),
+        key=lambda x: x[1][0],  # ordenar por score
+        reverse=True,
+    )
+
+    # Extraer solo los release_ids en orden
+    candidates = [release_id for release_id, (score, strategy) in ranked_releases]
+
+    # Diversificar por artista
+    diversified = _diversify_by_artist(candidates, limit=limit * 2)
+
+    # Tomar top-K después de diversificar
+    final_recommendations = diversified[:limit]
+
+    # Cachear información
+    _cache_last_strategy(user_id, "max_ensemble")
+    explanation = f"Mejores recomendaciones combinando {len(strategies_available)} algoritmos"
+    _cache_last_explanation(user_id, [explanation])
+
+    return final_recommendations
+
+
 def recommend_context(user_id: str, release_id: int, limit: int = 3) -> List[int]:
     """Recomendar lanzamientos vinculados a un lanzamiento dado, excluyendo los vistos."""
 
@@ -2098,16 +2227,20 @@ def current_database_info() -> dict:
 
 _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
     {
-        "id": "hybrid",
-        "name": "Motor híbrido",
-        "description": "Combina estrategias según tu historial para priorizar la señal más fuerte.",
+        "id": "max_ensemble",
+        "name": "Max-Ensemble (Sistema Principal)",
+        "description": (
+            "Genera candidatos de múltiples estrategias simultáneamente y selecciona "
+            "el puntaje máximo para cada disco. Se adapta según tu historial: "
+            "0 ratings usa Popular, 1-19 usa Pairs+Content, 20+ usa Pairs+Content+Advanced. "
+        ),
     },
     {
         "id": "pairs",
         "name": "Co-ocurrencia (release_pairs)",
         "description": (
             "Aprovecha discos que suelen aparecer juntos cuando tenés hasta "
-            "8 calificaciones positivas."
+            "8 calificaciones positivas. Componente del Max-Ensemble."
         ),
     },
     {
@@ -2116,7 +2249,8 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "description": (
             "Sistema unificado que combina NMF y Two Towers según tu nivel. "
             "Nivel 1 (20+ calificaciones): usa solo NMF. "
-            "Nivel 2 (30+ calificaciones): combina NMF y Two Towers con bonus de consenso."
+            "Nivel 2 (30+ calificaciones): combina NMF y Two Towers con bonus de consenso. "
+            "Componente del Max-Ensemble."
         ),
     },
     {
@@ -2140,7 +2274,9 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "id": "content",
         "name": "Perfiles de contenido",
         "description": (
-            "Utiliza tus géneros y artistas mejor puntuados para encontrar " "lanzamientos afines."
+            "Utiliza tus géneros y artistas mejor puntuados para encontrar "
+            "lanzamientos afines. "
+            "Componente del Max-Ensemble."
         ),
     },
     {

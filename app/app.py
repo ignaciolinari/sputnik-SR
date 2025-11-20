@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "15/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "20/11/2025")
 
 
 RATING_CHOICES = [
@@ -226,7 +226,7 @@ def recommendations():
                 "prev_page_url": prev_page_url,
             }
 
-    release_ids = recommender.recommend(user_id)
+    release_ids = recommender.recommend_max_ensemble(user_id)
 
     # Batch insert para marcar releases como vistos (más eficiente que loop)
     if release_ids:
@@ -352,6 +352,62 @@ def recommendations_for_release(release_id: int):
         rating_choices=RATING_CHOICES,
         next_url=next_url,
     )
+
+
+@app.get("/api/recommend/<user_id>/max_ensemble")
+def api_recommend_max_ensemble(user_id: str):
+    """
+    API endpoint para obtener recomendaciones usando Max-Ensemble.
+
+    Sistema experimental que combina múltiples estrategias seleccionando
+    el score máximo para cada release candidato.
+
+    Parámetros:
+        - limit: Número de recomendaciones (default: 9)
+        - format: 'ids' o 'full' (default: 'full')
+
+    Ejemplo:
+        GET /api/recommend/user123/max_ensemble?limit=9&format=full
+    """
+    limit = request.args.get("limit", default=9, type=int)
+    response_format = request.args.get("format", default="full", type=str)
+
+    # Validar límite
+    if limit < 1 or limit > 100:
+        return jsonify({"error": "limit must be between 1 and 100"}), 400
+
+    try:
+        # Generar recomendaciones con max-ensemble
+        release_ids = recommender.recommend_max_ensemble(user_id, limit=limit)
+
+        # Formato de respuesta
+        if response_format == "ids":
+            # Solo IDs
+            return jsonify(
+                {
+                    "user_id": user_id,
+                    "strategy": "max_ensemble",
+                    "recommendations": release_ids,
+                    "count": len(release_ids),
+                }
+            )
+        else:
+            # Información completa de releases
+            releases = recommender.release_details(release_ids)
+            explanations = recommender.last_explanations(user_id)
+
+            return jsonify(
+                {
+                    "user_id": user_id,
+                    "strategy": "max_ensemble",
+                    "recommendations": releases,
+                    "explanations": explanations,
+                    "count": len(releases),
+                }
+            )
+
+    except Exception as e:
+        return jsonify({"error": str(e), "user_id": user_id}), 500
 
 
 @app.post("/recomendaciones")
