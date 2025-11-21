@@ -273,8 +273,8 @@ Cuando ambos sistemas están disponibles en nivel 2:
 3. **Combina scores con pesos:**
    ```python
    combined_score = (
-       0.6 * nmf_score +           # 60% peso para NMF
-       0.4 * two_towers_score      # 40% peso para Two Towers
+       0.4 * nmf_score +           # 40% peso para NMF
+       0.6 * two_towers_score      # 60% peso para Two Towers
    )
    ```
 
@@ -316,8 +316,8 @@ El endpoint detecta automáticamente el nivel del usuario y actualiza los sistem
 
 - **`min_advanced_level_1_signals`**: `20` - Umbral para nivel 1 (NMF)
 - **`min_advanced_level_2_signals`**: `30` - Umbral para nivel 2 (NMF + Two Towers)
-- **`advanced_nmf_weight`**: `0.6` - Peso de NMF en combinación
-- **`advanced_two_towers_weight`**: `0.4` - Peso de Two Towers en combinación
+- **`advanced_nmf_weight`**: `0.4` - Peso de NMF en combinación
+- **`advanced_two_towers_weight`**: `0.6` - Peso de Two Towers en combinación
 - **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos en ambos sistemas
 
 ---
@@ -552,7 +552,7 @@ El modelo consiste en dos redes neuronales separadas:
 1. Sistema híbrido detecta que tiene ≥30 calificaciones (nivel 2)
 2. Usa `recommend_advanced()` que combina NMF + Two Towers
 3. Obtiene candidatos de ambos sistemas
-4. Combina scores con pesos (60% NMF, 40% Two Towers)
+4. Combina scores con pesos (40% NMF, 60% Two Towers)
 5. Aplica bonus de consenso (+0.2) a candidatos que aparecen en ambos
 6. Retorna top 9 recomendaciones con mejor score combinado
 

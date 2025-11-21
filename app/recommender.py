@@ -37,9 +37,9 @@ class Config:
     min_advanced_level_2_signals: int = (
         30  # Minimum positive ratings for advanced recommendations level 2 (NMF + Two Towers)
     )
-    advanced_nmf_weight: float = 0.6  # Weight for NMF in combined advanced recommendations
+    advanced_nmf_weight: float = 0.4  # Weight for NMF in combined advanced recommendations
     advanced_two_towers_weight: float = (
-        0.4  # Weight for Two Towers in combined advanced recommendations
+        0.6  # Weight for Two Towers in combined advanced recommendations
     )
     advanced_consensus_bonus: float = 0.2  # Bonus for candidates appearing in both systems
     genre_weight: float = 1.0
