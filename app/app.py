@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "20/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "23/11/2025")
 
 
 RATING_CHOICES = [
@@ -258,11 +258,13 @@ def recommendations():
         recommender.get_advanced_recommendations_level(user_id)
     )
     has_advanced_embedding = False
+    has_two_towers_embedding = False
     if advanced_level >= 1:
         has_nmf = recommender.user_has_nmf_embedding(user_id)
         has_tt = (
             recommender.user_has_two_towers_embedding(user_id) if advanced_level >= 2 else False
         )
+        has_two_towers_embedding = has_tt
         has_advanced_embedding = has_nmf or (advanced_level >= 2 and has_tt)
 
     genre_options = list(recommender.list_genres())
@@ -313,6 +315,7 @@ def recommendations():
         advanced_current_signals=current_signals,
         advanced_next_level_signals=next_level_signals,
         has_advanced_embedding=has_advanced_embedding,
+        has_two_towers_embedding=has_two_towers_embedding,
     )
 
 

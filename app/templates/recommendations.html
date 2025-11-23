@@ -16,13 +16,21 @@
                 type="button"
                 class="ml-3 bg-gradient-to-r from-teal-500 to-purple-500 text-white font-semibold text-xs px-4 py-1 rounded hover:from-teal-600 hover:to-purple-600 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-teal-500 disabled:hover:to-purple-500 transition-all"
                 {% if advanced_level == 0 %}
-                    title="Desbloquea con {{ advanced_next_level_signals }} calificaciones positivas"
+                    title="Desbloquea recomendaciones basadas en embeddings personalizados. Necesitás {{ advanced_next_level_signals }} calificaciones positivas."
                     aria-label="Desbloquea con {{ advanced_next_level_signals }} calificaciones positivas"
                     disabled
                 {% elif advanced_level == 1 %}
-                    {% if has_advanced_embedding %}title="Actualizar recomendaciones avanzadas (Nivel 1: NMF)"{% else %}title="Activar recomendaciones avanzadas (Nivel 1: NMF)"{% endif %}
+                    {% if has_advanced_embedding %}
+                        title="Actualizar embeddings NMF con tus nuevas calificaciones"
+                    {% else %}
+                        title="Generar embeddings NMF personalizados basados en tus {{ advanced_current_signals }} calificaciones"
+                    {% endif %}
                 {% else %}
-                    {% if has_advanced_embedding %}title="Actualizar recomendaciones avanzadas (Nivel 2: NMF + Two Towers)"{% else %}title="Activar recomendaciones avanzadas (Nivel 2: NMF + Two Towers)"{% endif %}
+                    {% if has_advanced_embedding %}
+                        title="Actualizar embeddings (NMF y Two Towers) con tus nuevas calificaciones"
+                    {% else %}
+                        title="¡Subir de nivel! Ahora podés activar Two Towers además de NMF"
+                    {% endif %}
                 {% endif %}
             >
                 {% if advanced_level == 0 %}
@@ -30,7 +38,7 @@
                 {% elif advanced_level == 1 %}
                     {% if has_advanced_embedding %}🔄 Actualizar avanzadas (Nivel 1){% else %}✨ Activar avanzadas (Nivel 1){% endif %}
                 {% else %}
-                    {% if has_advanced_embedding %}🔄 Actualizar avanzadas (Nivel 2){% else %}✨ Activar avanzadas (Nivel 2){% endif %}
+                    {% if has_two_towers_embedding %}🔄 Actualizar avanzadas{% else %}⬆️ Subir de nivel{% endif %}
                 {% endif %}
             </button>
             {% if advanced_level >= 1 and advanced_level < 2 and advanced_next_level_signals > 0 %}
@@ -276,12 +284,28 @@
                     </p>
                 </section>
                 <section>
-                    <h3 class="text-base font-semibold text-slate-700 mb-2">Sistemas de recomendación activos</h3>
+                    <h3 class="text-base font-semibold text-slate-700 mb-2">Estrategias activas</h3>
                     <ul class="space-y-2">
                         {% for system in active_recommenders %}
-                        <li class="border border-slate-200 rounded-lg p-3">
-                            <p class="text-sm font-semibold text-slate-700">{{ system.name }}</p>
+                        <li class="{% if system.is_primary %}border-2 border-teal-500 bg-teal-50{% else %}border border-slate-200{% endif %} rounded-lg p-3 relative group">
+                            <p class="text-sm font-semibold {% if system.is_primary %}text-teal-700{% else %}text-slate-700{% endif %}">
+                                {{ system.name }}
+                                {% if system.is_primary %}
+                                <span class="text-xs font-normal text-teal-600 ml-1">★ Principal</span>
+                                {% endif %}
+                                {% if system.tooltip_detail %}
+                                <span class="text-xs text-slate-400 ml-1 cursor-help" title="Más detalles">ⓘ</span>
+                                {% endif %}
+                            </p>
                             <p class="text-xs text-slate-500">{{ system.description }}</p>
+
+                            {% if system.tooltip_detail %}
+                            <div class="hidden group-hover:block absolute left-0 right-0 top-full mt-1 z-10 bg-slate-800 text-white text-xs rounded-lg p-3 shadow-lg">
+                                <p class="font-semibold mb-1">Componentes:</p>
+                                <p class="mb-1"><span class="font-medium">NMF:</span> {{ system.tooltip_detail.nmf }}</p>
+                                <p><span class="font-medium">Two Towers:</span> {{ system.tooltip_detail.two_towers }}</p>
+                            </div>
+                            {% endif %}
                         </li>
                         {% endfor %}
                     </ul>

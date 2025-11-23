@@ -1544,11 +1544,53 @@ def get_advanced_recommendations_level(user_id: str) -> tuple[int, int, int]:
         return (2, positive_count, 0)
 
 
+def _calculate_advanced_weights(n_positive: int) -> tuple[float, float]:
+    """Calcular pesos dinámicos para NMF y Two Towers basados en número de ratings.
+
+    Two Towers es generalmente mejor que NMF, especialmente con más historial.
+    Los pesos se ajustan progresivamente para favorecer Two Towers:
+
+    - 30-50 ratings: NMF 0.50, Two Towers 0.50 (balance inicial)
+    - 51-100 ratings: NMF 0.40, Two Towers 0.60 (favorece TT)
+    - 101-200 ratings: NMF 0.30, Two Towers 0.70 (más TT)
+    - 201+ ratings: NMF 0.20, Two Towers 0.80 (dominio TT)
+
+    Args:
+        n_positive: Número de ratings positivos del usuario
+
+    Returns:
+        (nmf_weight, two_towers_weight) - Tuple con pesos que suman 1.0
+    """
+    if n_positive < Config.min_advanced_level_2_signals:
+        # Nivel 1: solo NMF
+        return (1.0, 0.0)
+
+    # Nivel 2: pesos progresivos
+    if n_positive < 51:
+        # 30-50: Balance inicial (50-50)
+        return (0.5, 0.5)
+    elif n_positive < 101:
+        # 51-100: Favorece Two Towers (40-60)
+        return (0.4, 0.6)
+    elif n_positive < 201:
+        # 101-200: Más Two Towers (30-70)
+        return (0.3, 0.7)
+    else:
+        # 201+: Dominio Two Towers (20-80)
+        return (0.2, 0.8)
+
+
 def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
     """Recomendar usando sistema avanzado combinado (NMF + Two Towers).
 
     Esta función combina recomendaciones de NMF y Two Towers cuando ambos están disponibles.
-    Para nivel 1 solo usa NMF, para nivel 2 combina ambos sistemas.
+    Para nivel 1 solo usa NMF, para nivel 2 combina ambos sistemas con pesos dinámicos.
+
+    Los pesos se ajustan según el historial del usuario:
+    - 30-50 ratings: 50% NMF, 50% Two Towers
+    - 51-100 ratings: 40% NMF, 60% Two Towers
+    - 101-200 ratings: 30% NMF, 70% Two Towers
+    - 201+ ratings: 20% NMF, 80% Two Towers
 
     Returns empty list if embeddings are not available or user has insufficient history.
     """
@@ -1562,6 +1604,15 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
         nmf_candidates = recommend_nmf(
             user_id, limit=limit * 2
         )  # Obtener más candidatos para mejor calidad
+
+        # Cachear metadata: nivel 1 solo tiene NMF
+        _ADVANCED_METADATA = getattr(recommend_advanced, "_metadata", {})
+        _ADVANCED_METADATA[user_id] = {
+            "has_two_towers": False,  # Nivel 1: solo NMF
+            "has_nmf": bool(nmf_candidates),
+        }
+        recommend_advanced._metadata = _ADVANCED_METADATA
+
         if nmf_candidates:
             return nmf_candidates[:limit]
         return []
@@ -1569,6 +1620,15 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
     # Nivel 2: Combinar NMF + Two Towers
     nmf_candidates = recommend_nmf(user_id, limit=limit * 3)
     two_towers_candidates = recommend_two_towers(user_id, limit=limit * 3)
+
+    # Cachear metadata sobre qué sistemas están realmente disponibles
+    # Esto es importante para mostrar el mensaje correcto en max_ensemble
+    _ADVANCED_METADATA = getattr(recommend_advanced, "_metadata", {})
+    _ADVANCED_METADATA[user_id] = {
+        "has_two_towers": bool(two_towers_candidates),
+        "has_nmf": bool(nmf_candidates),
+    }
+    recommend_advanced._metadata = _ADVANCED_METADATA
 
     # Si solo uno está disponible, usar ese
     if nmf_candidates and not two_towers_candidates:
@@ -1609,15 +1669,17 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
     combined_scores: Dict[int, float] = {}
     all_candidates = set(nmf_candidates) | set(two_towers_candidates)
 
+    # Obtener número de ratings positivos para calcular pesos dinámicos
+    interactions = _user_interactions(user_id)
+    n_positive = len([i for i in interactions if i.rating >= Config.positive_rating_threshold])
+    nmf_weight, tt_weight = _calculate_advanced_weights(n_positive)
+
     for release_id in all_candidates:
         nmf_score = nmf_scores.get(release_id, 0.0)
         two_towers_score = two_towers_scores.get(release_id, 0.0)
 
-        # Score combinado con pesos
-        combined_score = (
-            Config.advanced_nmf_weight * nmf_score
-            + Config.advanced_two_towers_weight * two_towers_score
-        )
+        # Score combinado con pesos dinámicos (favorecen Two Towers con más ratings)
+        combined_score = nmf_weight * nmf_score + tt_weight * two_towers_score
 
         # Bonus si aparece en ambos sistemas (consenso)
         if release_id in nmf_candidates and release_id in two_towers_candidates:
@@ -1693,6 +1755,9 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
     # Estructura: {release_id: (max_score, strategy_name)}
     max_scores: Dict[int, tuple[float, str]] = {}
 
+    # Rastrear qué estrategias realmente contribuyeron
+    strategies_used = set()
+
     # Generar candidatos con cada estrategia disponible
     for strategy_name, candidate_multiplier in strategies_available:
         try:
@@ -1712,6 +1777,10 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
                 candidates = recommend_advanced(user_id, limit=n_candidates)
             else:
                 continue
+
+            # Solo marcar como usada si generó candidatos
+            if candidates:
+                strategies_used.add(strategy_name)
 
             # Asignar scores basados en ranking (posición)
             # Score decreciente: primer candidato = 1.0, último ≈ 0.0
@@ -1753,8 +1822,37 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
 
     # Cachear información
     _cache_last_strategy(user_id, "max_ensemble")
-    explanation = f"Mejores recomendaciones combinando {len(strategies_available)} algoritmos"
-    _cache_last_explanation(user_id, [explanation])
+
+    # Generar explicación según estrategias activas
+    if "advanced" in strategies_used:
+        # Verificar qué componentes de advanced están realmente disponibles
+        advanced_metadata = getattr(recommend_advanced, "_metadata", {}).get(user_id, {})
+        has_two_towers = advanced_metadata.get("has_two_towers", False)
+        has_nmf = advanced_metadata.get("has_nmf", False)
+
+        if has_two_towers and has_nmf:
+            # Ambos activos: pairs + content + NMF + Two Towers = 4 algoritmos
+            explanation = "Mejores recomendaciones combinando 4 algoritmos"
+        else:
+            # Solo NMF: pairs + content + NMF = 3 algoritmos
+            explanation = "Mejores recomendaciones combinando 3 algoritmos"
+        _cache_last_explanation(user_id, [explanation])
+    else:
+        # Sin advanced: solo pairs + content
+        strategy_names = []
+        if "pairs" in strategies_used:
+            strategy_names.append("co-ocurrencia")
+        if "content" in strategies_used:
+            strategy_names.append("contenido")
+
+        if len(strategy_names) == 2:
+            explanation = "Recomendaciones basadas en co-ocurrencia y contenido"
+        elif len(strategy_names) == 1:
+            explanation = f"Recomendaciones basadas en {strategy_names[0]}"
+        else:
+            explanation = "Recomendaciones personalizadas"
+
+        _cache_last_explanation(user_id, [explanation])
 
     return final_recommendations
 
@@ -2228,70 +2326,51 @@ def current_database_info() -> dict:
 _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
     {
         "id": "max_ensemble",
-        "name": "Max-Ensemble (Sistema Principal)",
+        "name": "Max-Ensemble",
         "description": (
-            "Genera candidatos de múltiples estrategias simultáneamente y selecciona "
-            "el puntaje máximo para cada disco. Se adapta según tu historial: "
-            "0 ratings usa Popular, 1-19 usa Pairs+Content, 20+ usa Pairs+Content+Advanced. "
+            "Estrategia principal que combina todas las técnicas disponibles "
+            "y selecciona las mejores recomendaciones."
         ),
-    },
-    {
-        "id": "pairs",
-        "name": "Co-ocurrencia (release_pairs)",
-        "description": (
-            "Aprovecha discos que suelen aparecer juntos cuando tenés hasta "
-            "8 calificaciones positivas. Componente del Max-Ensemble."
-        ),
+        "is_primary": True,
     },
     {
         "id": "advanced",
-        "name": "Recomendaciones Avanzadas (NMF + Two Towers)",
+        "name": "Recomendaciones Avanzadas",
         "description": (
-            "Sistema unificado que combina NMF y Two Towers según tu nivel. "
-            "Nivel 1 (20+ calificaciones): usa solo NMF. "
-            "Nivel 2 (30+ calificaciones): combina NMF y Two Towers con bonus de consenso. "
-            "Componente del Max-Ensemble."
+            "Genera embeddings personalizados basados en tu historial. "
+            "Se actualiza a pedido del usuario."
         ),
+        "tooltip_detail": {
+            "nmf": (
+                "Factorización de matrices que descubre patrones latentes " "en tus preferencias."
+            ),
+            "two_towers": (
+                "Red neuronal que aprende representaciones profundas de usuarios y discos. "
+                "Usa pesos dinámicos que favorecen Two Towers progresivamente."
+            ),
+        },
     },
     {
-        "id": "nmf",
-        "name": "Factorización matricial (NMF)",
+        "id": "pairs",
+        "name": "Co-ocurrencia",
         "description": (
-            "Usa patrones latentes aprendidos de tus preferencias. "
-            "Parte del sistema avanzado nivel 1 (20+ calificaciones positivas)."
-        ),
-    },
-    {
-        "id": "two_towers",
-        "name": "Two Towers (Deep Learning)",
-        "description": (
-            "Modelo de aprendizaje profundo que aprende embeddings de usuarios e items "
-            "usando características y preferencias. "
-            "Parte del sistema avanzado nivel 2 (30+ calificaciones positivas)."
+            "Descubre discos que suelen aparecer juntos en colecciones " "de usuarios similares."
         ),
     },
     {
         "id": "content",
-        "name": "Perfiles de contenido",
-        "description": (
-            "Utiliza tus géneros y artistas mejor puntuados para encontrar "
-            "lanzamientos afines. "
-            "Componente del Max-Ensemble."
-        ),
+        "name": "Basado en Contenido",
+        "description": "Recomienda según géneros y artistas de tus discos mejor puntuados.",
     },
     {
         "id": "popular",
         "name": "Popularidad",
-        "description": (
-            "Rellena con lanzamientos populares que todavía no viste cuando " "faltan candidatos."
-        ),
+        "description": "Completa con discos populares que aún no exploraste.",
     },
     {
         "id": "random",
-        "name": "Exploración aleatoria",
-        "description": (
-            "Agrega muestras controladas para descubrir discos fuera de tu " "zona habitual."
-        ),
+        "name": "Exploración",
+        "description": "Agrega variedad con descubrimientos aleatorios fuera de tu zona habitual.",
     },
 ]
 
