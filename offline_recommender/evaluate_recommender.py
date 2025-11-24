@@ -440,9 +440,9 @@ def evaluate_user(
             ("popular", lambda: recommender._popular_unseen_releases(user_id, k)),
         ]
 
-        # Ejecutar sistemas en paralelo (máximo 2 threads para reducir memoria)
-        # Con 6 workers × 2 threads = 12 threads totales (vs 6 × 8 = 48 antes)
-        # Esto reduce memoria significativamente mientras mantiene paralelización de I/O
+        # Ejecutar sistemas en paralelo (máximo 2 threads para balance memoria/paralelismo)
+        # Con 4 workers × 2 threads = 8 threads totales
+        # Reducido de 2 a 2 para mantener paralelismo pero con optimizaciones de memoria
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
                 executor.submit(get_recommendation, name, func): name for name, func in systems
@@ -672,26 +672,48 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
     database_path = Path(database_path_str)
     output_path = Path(output_path_str) if output_path_str else None
     results = []
-    save_interval = 50  # Guardar cada 50 usuarios
+    save_interval = (
+        25  # Guardar cada 25 usuarios (reducido para liberar memoria más frecuentemente)
+    )
     saved_count = 0  # Contador de resultados ya guardados
 
     # Limpiar memoria al inicio del proceso hijo (reduce memoria heredada del fork)
     gc.collect()
+
+    # Limpiar caches LRU del módulo recommender al inicio del proceso hijo
+    try:
+        import app.recommender as recommender_module
+
+        # Limpiar todos los caches LRU conocidos
+        if hasattr(recommender_module, "release_genres"):
+            recommender_module.release_genres.cache_clear()
+        if hasattr(recommender_module, "release_artist_id"):
+            recommender_module.release_artist_id.cache_clear()
+        # Limpiar otros caches LRU
+        for attr_name in dir(recommender_module):
+            attr = getattr(recommender_module, attr_name, None)
+            if hasattr(attr, "cache_clear"):
+                try:
+                    attr.cache_clear()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # Cada proceso tiene su propia conexión
     with sqlite3.connect(database_path) as connection:
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        # Cache muy reducido para procesos hijos (32MB por proceso)
+        # Cache muy reducido para procesos hijos (16MB por proceso - reducido aún más)
         connection.execute(
-            "PRAGMA cache_size=-32000"
-        )  # 32MB cache (reducido para procesos paralelos)
+            "PRAGMA cache_size=-16000"
+        )  # 16MB cache (reducido para procesos paralelos)
         connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
-        # mmap_size muy reducido para procesos hijos (64MB por proceso)
+        # mmap_size muy reducido para procesos hijos (32MB por proceso - reducido aún más)
         connection.execute(
-            "PRAGMA mmap_size=67108864"
-        )  # 64MB memory-mapped I/O (reducido para procesos paralelos)
+            "PRAGMA mmap_size=33554432"
+        )  # 32MB memory-mapped I/O (reducido para procesos paralelos)
         connection.execute(f"PRAGMA threads={sqlite_threads}")  # Threads ajustados según workers
         connection.row_factory = sqlite3.Row
 
@@ -712,8 +734,18 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
                         results.append(result)
 
                         # Limpiar memoria después de cada usuario procesado
-                        if idx % 10 == 0:  # Cada 10 usuarios
+                        if idx % 5 == 0:  # Cada 5 usuarios (aumentado frecuencia)
                             gc.collect()
+                            # Limpiar caches LRU periódicamente
+                            try:
+                                import app.recommender as recommender_module
+
+                                if hasattr(recommender_module, "release_genres"):
+                                    recommender_module.release_genres.cache_clear()
+                                if hasattr(recommender_module, "release_artist_id"):
+                                    recommender_module.release_artist_id.cache_clear()
+                            except Exception:
+                                pass
 
                     # Guardar resultados cada N usuarios si hay output path
                     if output_path and len(results) - saved_count >= save_interval:
@@ -842,13 +874,13 @@ def evaluate(
         # Optimización: Habilitar WAL mode para mejor rendimiento
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
-        # Cache reducido para proceso principal también (32MB)
-        connection.execute("PRAGMA cache_size=-32000")  # 32MB cache (reducido para ahorrar memoria)
+        # Cache reducido para proceso principal también (16MB)
+        connection.execute("PRAGMA cache_size=-16000")  # 16MB cache (reducido para ahorrar memoria)
         connection.execute("PRAGMA temp_store=MEMORY")  # Usar RAM para temp tables
-        # mmap_size reducido para proceso principal también (64MB)
+        # mmap_size reducido para proceso principal también (32MB)
         connection.execute(
-            "PRAGMA mmap_size=67108864"
-        )  # 64MB memory-mapped I/O (reducido para ahorrar memoria)
+            "PRAGMA mmap_size=33554432"
+        )  # 32MB memory-mapped I/O (reducido para ahorrar memoria)
         connection.execute(f"PRAGMA threads={sqlite_threads}")  # Threads ajustados según workers
         connection.row_factory = sqlite3.Row
 
