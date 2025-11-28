@@ -273,9 +273,9 @@ pre-commit run --all-files
   - **Perfiles de contenido** (géneros y artistas) como fallback cuando las recomendaciones avanzadas no están disponibles.
   - **Popularidad** como fallback inicial.
   - Si aún quedan slots vacíos, mezcla candidatos populares y aleatorios para diversificar.
-- **Estrategias experimentales de ensamble** (disponibles vía API):
+- **Estrategias de ensamble** (disponibles vía API):
   - **Max-Ensemble** (`/api/recommend/<user_id>/max_ensemble`): Combina múltiples estrategias seleccionando el score máximo para cada release candidato. Preserva los mejores scores individuales de cada algoritmo.
-  - **RRF-Ensemble** (`/api/recommend/<user_id>/rrf_ensemble`): Combina rankings usando Reciprocal Rank Fusion (RRF), recompensando el consenso entre algoritmos. Técnica estándar en Information Retrieval.
+  - **RRF-Ensemble** (`/api/recommend/<user_id>/rrf_ensemble`): Combina rankings usando Reciprocal Rank Fusion (RRF), recompensando el consenso entre algoritmos. Default calibrado en `k=10` tras evaluación offline.
 - Página de contexto: ensambla candidatos combinando `release_recommendations`, vecinos por `release_pairs`, otros lanzamientos del artista y populares no vistos.
 - Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"**. El sistema detecta automáticamente el nivel y actualiza los sistemas correspondientes (NMF en nivel 1, NMF + Two Towers en nivel 2).
 - Todas las interacciones se persisten en `interactions` con `rating` en [0, 5] y `rating_date = now()`.
@@ -290,8 +290,8 @@ pre-commit run --all-files
   - `recommend_nmf`: factorización matricial usando embeddings precomputados (NMF).
   - `recommend_two_towers`: aprendizaje profundo usando embeddings precomputados (Two Towers).
   - `recommend_random`: muestreo uniforme de lanzamientos no vistos para exploración controlada.
-  - `recommend_max_ensemble`: combina múltiples estrategias seleccionando el score máximo (experimental).
-  - `recommend_rrf_ensemble`: combina rankings usando Reciprocal Rank Fusion (RRF) para detectar consenso (experimental).
+  - `recommend_max_ensemble`: combina múltiples estrategias seleccionando el score máximo.
+  - `recommend_rrf_ensemble`: combina rankings usando Reciprocal Rank Fusion (RRF) para detectar consenso (estable, default `k=10`).
 - Lógica híbrida en `recommend`:
   - Usuarios sin ratings → populares + aleatorios.
   - Hasta 8 ratings positivos → co-ocurrencia.
@@ -376,6 +376,9 @@ El sistema de recomendaciones avanzadas requiere embeddings de NMF y Two Towers.
   - `candidate_pool_multiplier`: expande la búsqueda de candidatos en contenido.
   - `pairs_limit_multiplier` / `pairs_table_sample`: controlan el tamaño del sample en co-ocurrencia.
   - `popularity_recent_divisor`: suaviza el bonus por discos recientes.
+  - `rrf_default_k`: constante de suavizado para RRF-Ensemble (default: 10, calibrado offline; ajustable con `search_rrf_k.py`).
+  - `rrf_candidate_multiplier`: cuántos candidatos aporta cada estrategia antes de fusionar en RRF (default: 4× el `limit` solicitado).
+  - `rrf_strategy_weights`: pesos relativos por estrategia dentro del ensamble RRF (permite equilibrar señales).
 
 Modificá estos valores al inicio del módulo para experimentar sin reescribir funciones.
 
@@ -395,13 +398,13 @@ Modificá estos valores al inicio del módulo para experimentar sin reescribir f
     ```
 
 - **Salida**
-  - Promedio de NDCG@k por estrategia (híbrido, ensambles experimentales, recomendaciones avanzadas, pares, contenido, aleatorio, popularidad).
+  - Promedio de NDCG@k por estrategia (híbrido, ensambles, recomendaciones avanzadas, pares, contenido, aleatorio, popularidad).
   - Con `--verbose`, loggea por consola el NDCG de cada usuario evaluado.
   - El CSV indicado en `--output` contiene una fila por usuario y puede analizarse luego en pandas o planillas; se recomienda guardarlo en `offline_recommender/output/`.
 - Reporta métricas promedio para:
   - Híbrido (`recommend`)
-  - Max-Ensemble (`recommend_max_ensemble`) - experimental
-  - RRF-Ensemble (`recommend_rrf_ensemble`) - experimental
+  - Max-Ensemble (`recommend_max_ensemble`) - estable
+  - RRF-Ensemble (`recommend_rrf_ensemble`) - estable (`k=10`)
   - Recomendaciones avanzadas (`recommend_advanced`)
   - Co-ocurrencia (`recommend_from_pairs`)
   - NMF (`recommend_nmf`)
@@ -410,3 +413,20 @@ Modificá estos valores al inicio del módulo para experimentar sin reescribir f
   - Aleatorio (`recommend_random`)
   - Popularidad (`_popular_unseen_releases`)
 - El CSV opcional permite seguir la evolución usuario por usuario y comparar estrategias de ensamble.
+
+### Búsqueda rápida del mejor `k` para RRF
+
+- Script `offline_recommender/search_rrf_k.py` ejecuta un grid-search sobre distintos valores de `k` manteniendo el mismo set de usuarios/holdouts y reporta la métrica promedio por valor.
+
+    ```bash
+    python offline_recommender/search_rrf_k.py \
+        --database data/sputnik.db \
+        --k-values 5 8 10 12 15 20 30 \
+        --sample-size 150 \
+        --min-ratings 40 \
+        --metric ndcg
+    ```
+
+- Muestra una tabla con NDCG/Hit-Rate/Recall por `k` y destaca el mejor valor según la métrica elegida. Se puede exportar a CSV con `--output offline_recommender/output/rrf_k_grid.csv`.
+- Si especificás `--output` y/o `--user-metrics`, el script escribe resultados incrementalmente (modo append). Ante un corte vuelve a leer esos CSV, omite los valores de `k` ya procesados y reanuda solo los pendientes; con `--user-metrics` además reutiliza exactamente el mismo conjunto de usuarios/holdouts.
+- El script reutiliza los rankings base de cada estrategia (los calcula una sola vez por usuario) y después aplica distintos valores de `k`, lo que acelera las pruebas de hiperparámetros. Podés paralelizar por usuarios con `--workers` (default: `CPU-1`) y no tenés que limpiar archivos manualmente: detecta combinaciones `usuario/k` ya evaluadas y evita duplicarlas al reanudar.

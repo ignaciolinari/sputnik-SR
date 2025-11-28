@@ -421,7 +421,6 @@ def api_recommend_rrf_ensemble(user_id: str):
     Reciprocal Rank Fusion combina rankings de múltiples algoritmos:
     - pairs: co-ocurrencia
     - content: géneros/artistas similares
-    - popular: releases populares
     - nmf: factorización matricial (20+ ratings)
     - two_towers: deep learning (30+ ratings)
 
@@ -429,14 +428,14 @@ def api_recommend_rrf_ensemble(user_id: str):
 
     Parámetros:
         - limit: Número de recomendaciones (default: 9)
-        - k: Constante de suavizado RRF (default: 60)
+        - k: Constante de suavizado RRF (default configurable en el backend)
         - format: 'ids' o 'full' (default: 'full')
 
     Ejemplo:
-        GET /api/recommend/user123/rrf_ensemble?limit=9&k=60&format=full
+        GET /api/recommend/user123/rrf_ensemble?limit=9&k=10&format=full
     """
     limit = request.args.get("limit", default=9, type=int)
-    k = request.args.get("k", default=60, type=int)
+    k = request.args.get("k", default=recommender.Config.rrf_default_k, type=int)
     response_format = request.args.get("format", default="full", type=str)
 
     # Validar parámetros

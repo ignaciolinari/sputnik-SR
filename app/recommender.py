@@ -50,6 +50,14 @@ class Config:
     pairs_limit_multiplier: int = 3
     pairs_table_sample: int = 10
     candidate_pool_multiplier: int = 5
+    rrf_default_k: int = 10
+    rrf_candidate_multiplier: int = 4
+    rrf_strategy_weights: Dict[str, float] = {
+        "pairs": 1.0,
+        "content": 1.0,
+        "nmf": 1.0,
+        "two_towers": 1.0,
+    }
 
 
 _DEFAULT_POSITIVE_RATING = Config.positive_rating_threshold
@@ -180,6 +188,31 @@ _LAST_EXPLANATIONS: Dict[str, List[str]] = {}
 _LAST_CONTEXT_EXPLANATIONS: Dict[tuple[str, int], List[str]] = {}
 _LAST_STRATEGY: Dict[str, str] = {}
 _LAST_CONTEXT_STRATEGY: Dict[tuple[str, int], str] = {}
+_ADVANCED_SCORES: Dict[str, Dict[int, float]] = {}
+
+
+def _cache_advanced_scores(user_id: str, scores: Dict[int, float] | None) -> None:
+    if scores:
+        _ADVANCED_SCORES[user_id] = scores
+    else:
+        _ADVANCED_SCORES.pop(user_id, None)
+
+
+def _get_last_advanced_scores(user_id: str) -> Dict[int, float]:
+    return _ADVANCED_SCORES.get(user_id, {})
+
+
+def _scores_from_ranked_ids(candidates: Sequence[int]) -> Dict[int, float]:
+    """Asignar puntajes lineales normalizados a una lista ordenada de candidatos."""
+    if not candidates:
+        return {}
+    if len(candidates) == 1:
+        return {int(candidates[0]): 1.0}
+    max_idx = len(candidates) - 1
+    scores: Dict[int, float] = {}
+    for idx, release_id in enumerate(candidates):
+        scores[int(release_id)] = 1.0 - (idx / max_idx)
+    return scores
 
 
 @dataclass(frozen=True)
@@ -1597,6 +1630,7 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
     level, _, _ = get_advanced_recommendations_level(user_id)
 
     if level == 0:
+        _cache_advanced_scores(user_id, None)
         return []
 
     # Nivel 1: Solo NMF
@@ -1614,7 +1648,10 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
         recommend_advanced._metadata = _ADVANCED_METADATA
 
         if nmf_candidates:
-            return nmf_candidates[:limit]
+            final_candidates = nmf_candidates[:limit]
+            _cache_advanced_scores(user_id, _scores_from_ranked_ids(final_candidates))
+            return final_candidates
+        _cache_advanced_scores(user_id, None)
         return []
 
     # Nivel 2: Combinar NMF + Two Towers
@@ -1632,12 +1669,17 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
 
     # Si solo uno está disponible, usar ese
     if nmf_candidates and not two_towers_candidates:
-        return nmf_candidates[:limit]
+        final_candidates = nmf_candidates[:limit]
+        _cache_advanced_scores(user_id, _scores_from_ranked_ids(final_candidates))
+        return final_candidates
     if two_towers_candidates and not nmf_candidates:
-        return two_towers_candidates[:limit]
+        final_candidates = two_towers_candidates[:limit]
+        _cache_advanced_scores(user_id, _scores_from_ranked_ids(final_candidates))
+        return final_candidates
 
     # Si ninguno está disponible, retornar vacío
     if not nmf_candidates and not two_towers_candidates:
+        _cache_advanced_scores(user_id, None)
         return []
 
     # Combinar ambos sistemas
@@ -1689,7 +1731,10 @@ def recommend_advanced(user_id: str, limit: int = 9) -> List[int]:
 
     # Ordenar por score combinado y retornar top-k
     ranked = sorted(combined_scores.items(), key=lambda item: item[1], reverse=True)
-    return [release_id for release_id, _ in ranked[:limit]]
+    top_pairs = ranked[:limit]
+    final_candidates = [release_id for release_id, _ in top_pairs]
+    _cache_advanced_scores(user_id, {release_id: score for release_id, score in top_pairs})
+    return final_candidates
 
 
 def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
@@ -1765,6 +1810,7 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
             n_candidates = int(limit * 2 * candidate_multiplier)
 
             # Generar candidatos según la estrategia
+            strategy_scores: Dict[int, float] | None = None
             if strategy_name == "pairs":
                 candidates = recommend_from_pairs(
                     user_id, limit=n_candidates, interactions=interactions
@@ -1775,18 +1821,24 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
                 )
             elif strategy_name == "advanced":
                 candidates = recommend_advanced(user_id, limit=n_candidates)
+                strategy_scores = _get_last_advanced_scores(user_id)
             else:
                 continue
 
             # Solo marcar como usada si generó candidatos
             if candidates:
                 strategies_used.add(strategy_name)
+            else:
+                continue
 
             # Asignar scores basados en ranking (posición)
             # Score decreciente: primer candidato = 1.0, último ≈ 0.0
+            denominator = max(len(candidates), 1)
             for rank, release_id in enumerate(candidates):
                 # Score basado en posición inversa
-                score = 1.0 - (rank / max(len(candidates), 1))
+                score = 1.0 - (rank / denominator)
+                if strategy_scores:
+                    score = strategy_scores.get(release_id, score)
 
                 # Guardar score máximo para este release
                 if release_id not in max_scores or score > max_scores[release_id][0]:
@@ -1857,14 +1909,162 @@ def recommend_max_ensemble(user_id: str, limit: int = 9) -> List[int]:
     return final_recommendations
 
 
-def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int = 60) -> List[int]:
+def get_rrf_strategy_rankings(
+    user_id: str,
+    limit: int = 9,
+    *,
+    interactions: List[Interaction] | None = None,
+    positive_interactions: List[Interaction] | None = None,
+    per_strategy_limit: int | None = None,
+) -> tuple[Dict[str, List[int]], set[str]]:
+    """
+    Construir los rankings por estrategia usados por RRF sin fusionarlos aún.
+
+    Permite reutilizar los mismos candidatos para experimentar con distintos valores de k
+    sin volver a ejecutar cada algoritmo base (útil para evaluaciones offline).
+    """
+
+    if interactions is None:
+        interactions = _user_interactions(user_id)
+
+    if positive_interactions is None:
+        positive_interactions = [
+            interaction
+            for interaction in interactions
+            if interaction.rating >= _DEFAULT_POSITIVE_RATING
+        ]
+
+    if not positive_interactions:
+        return ({}, set())
+
+    n_positive = len(positive_interactions)
+    limit = max(1, int(limit))
+    if per_strategy_limit is None:
+        per_strategy_limit = max(limit, limit * Config.rrf_candidate_multiplier)
+    else:
+        per_strategy_limit = max(1, per_strategy_limit)
+
+    strategies: List[tuple[str, callable[[], List[int]]]] = []
+    strategies.append(
+        (
+            "pairs",
+            lambda: recommend_from_pairs(
+                user_id, limit=per_strategy_limit, interactions=interactions
+            ),
+        )
+    )
+    strategies.append(
+        (
+            "content",
+            lambda: recommend_content_based(
+                user_id, limit=per_strategy_limit, interactions=interactions
+            ),
+        )
+    )
+
+    if n_positive >= Config.min_advanced_level_1_signals:
+        strategies.append(("nmf", lambda: recommend_nmf(user_id, limit=per_strategy_limit)))
+
+    if n_positive >= Config.min_advanced_level_2_signals:
+        strategies.append(
+            ("two_towers", lambda: recommend_two_towers(user_id, limit=per_strategy_limit))
+        )
+
+    strategy_candidates: Dict[str, List[int]] = {}
+    strategies_used: set[str] = set()
+
+    for strategy_name, generator in strategies:
+        try:
+            candidates = generator()
+        except Exception as exc:  # pragma: no cover - medidas defensivas
+            print(f"Warning: Strategy {strategy_name} failed for user {user_id}: {exc}")
+            continue
+
+        if not candidates:
+            continue
+
+        trimmed = list(dict.fromkeys(candidates))[:per_strategy_limit]
+        if not trimmed:
+            continue
+
+        strategy_candidates[strategy_name] = trimmed
+        strategies_used.add(strategy_name)
+
+    return strategy_candidates, strategies_used
+
+
+def build_rrf_recommendations_from_rankings(
+    user_id: str,
+    strategy_candidates: Dict[str, Sequence[int]],
+    strategies_used: set[str],
+    *,
+    limit: int,
+    k: int,
+) -> tuple[List[int], str, bool]:
+    """
+    Fusionar rankings pre-calculados usando RRF y devolver las recomendaciones finales.
+
+    Returns:
+        final_recommendations: Lista final diversificada.
+        explanation: Texto descriptivo de la combinación usada.
+        used_fallback: True si se usó popular como fallback.
+    """
+
+    if not strategy_candidates:
+        fallback = _popular_unseen_releases(user_id, limit)
+        final = list(dict.fromkeys(fallback))[:limit]
+        return final, "Lanzamientos populares (fallback)", True
+
+    effective_k = max(int(k), 1)
+    strategy_weights = getattr(Config, "rrf_strategy_weights", {})
+
+    rrf_scores: Dict[int, float] = collections.defaultdict(float)
+    for strategy_name, candidates in strategy_candidates.items():
+        weight = strategy_weights.get(strategy_name, 1.0)
+        for rank_0indexed, release_id in enumerate(candidates):
+            rank = rank_0indexed + 1
+            rrf_scores[int(release_id)] += weight / (effective_k + rank)
+
+    ranked_releases = sorted(rrf_scores.items(), key=lambda item: item[1], reverse=True)
+    ordered_candidates = [release_id for release_id, _ in ranked_releases]
+    diversified = _diversify_by_artist(ordered_candidates, limit=limit * 2)
+    final_recommendations = diversified[:limit]
+
+    explanation = _compose_rrf_explanation(strategies_used)
+    return final_recommendations, explanation, False
+
+
+def _compose_rrf_explanation(strategies_used: set[str]) -> str:
+    n_algorithms = len(strategies_used)
+    if n_algorithms >= 4:
+        return f"Mejores recomendaciones combinando {n_algorithms} algoritmos (RRF)"
+    if n_algorithms == 3:
+        return "Recomendaciones combinando 3 algoritmos (RRF)"
+
+    strategy_names: List[str] = []
+    if "pairs" in strategies_used:
+        strategy_names.append("co-ocurrencia")
+    if "content" in strategies_used:
+        strategy_names.append("contenido")
+    if "nmf" in strategies_used:
+        strategy_names.append("patrones latentes")
+    if "two_towers" in strategies_used:
+        strategy_names.append("aprendizaje profundo")
+
+    if len(strategy_names) >= 2:
+        return f"Recomendaciones basadas en {', '.join(strategy_names[:-1])} y {strategy_names[-1]}"
+    if len(strategy_names) == 1:
+        return f"Recomendaciones basadas en {strategy_names[0]}"
+    return "Recomendaciones personalizadas"
+
+
+def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int | None = None) -> List[int]:
     """
     Reciprocal Rank Fusion Ensemble con todos los algoritmos disponibles.
 
-    Combina hasta 5 señales independientes usando RRF:
+    Combina hasta 4 señales independientes usando RRF:
     - pairs: co-ocurrencia (siempre con interacciones)
     - content: géneros/artistas similares (siempre con interacciones)
-    - popular: releases populares no vistos (siempre)
     - nmf: factorización matricial (20+ ratings)
     - two_towers: deep learning (30+ ratings)
 
@@ -1873,7 +2073,7 @@ def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int = 60) -> List[in
 
         RRF_score(item) = Σ 1/(k + rank)
 
-    Donde k es una constante de suavizado (default 60) y rank es la posición
+    Donde k es una constante de suavizado configurable y rank es la posición
     1-indexed del item en cada ranking.
 
     Ventajas sobre max_ensemble:
@@ -1884,7 +2084,7 @@ def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int = 60) -> List[in
     Args:
         user_id: ID del usuario
         limit: Número de recomendaciones a retornar (default: 9)
-        k: Constante de suavizado RRF (default: 60, valor estándar)
+        k: Constante de suavizado RRF (default: Config.rrf_default_k). Usa None para default.
 
     Returns:
         Lista de release_ids ordenados por RRF score
@@ -1900,7 +2100,11 @@ def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int = 60) -> List[in
         for interaction in interactions
         if interaction.rating >= _DEFAULT_POSITIVE_RATING
     ]
-    n_positive = len(positive_interactions)
+
+    effective_k = k if k is not None else Config.rrf_default_k
+    if effective_k < 1:
+        effective_k = 1
+    per_strategy_limit = max(limit, limit * Config.rrf_candidate_multiplier)
 
     # CASO 1: Sin interacciones → Popular (cold start)
     if not positive_interactions:
@@ -1909,123 +2113,26 @@ def recommend_rrf_ensemble(user_id: str, limit: int = 9, k: int = 60) -> List[in
         _cache_last_explanation(user_id, ["Lanzamientos populares para comenzar"])
         return list(dict.fromkeys(candidates))[:limit]
 
-    # CASO 2+: Con interacciones → RRF Ensemble
-    # Definir estrategias disponibles
-    # Cada tupla: (nombre, función_generadora, multiplicador_candidatos)
-    strategies: List[tuple] = []
-
-    # Siempre disponibles con interacciones
-    strategies.append(
-        (
-            "pairs",
-            lambda: recommend_from_pairs(user_id, limit=limit * 6, interactions=interactions),
-        )
-    )
-    strategies.append(
-        (
-            "content",
-            lambda: recommend_content_based(user_id, limit=limit * 3, interactions=interactions),
-        )
+    strategy_candidates, strategies_used = get_rrf_strategy_rankings(
+        user_id,
+        limit=limit,
+        interactions=interactions,
+        positive_interactions=positive_interactions,
+        per_strategy_limit=per_strategy_limit,
     )
 
-    # NOTA: Popular removido del RRF porque contamina los resultados.
-    # Popular tiene NDCG bajo (~0.22) y alta correlación con RRF (0.57),
-    # lo que indica que está empujando releases no relevantes al ranking final.
-    # Popular solo se usa como fallback en cold start.
-
-    # NMF: disponible desde 20+ ratings (nivel 1)
-    if n_positive >= Config.min_advanced_level_1_signals:
-        strategies.append(
-            (
-                "nmf",
-                lambda: recommend_nmf(user_id, limit=limit * 3),
-            )
-        )
-
-    # Two Towers: disponible desde 30+ ratings (nivel 2)
-    if n_positive >= Config.min_advanced_level_2_signals:
-        strategies.append(
-            (
-                "two_towers",
-                lambda: recommend_two_towers(user_id, limit=limit * 3),
-            )
-        )
-
-    # Diccionario para acumular RRF scores
-    rrf_scores: Dict[int, float] = collections.defaultdict(float)
-
-    # Rastrear qué estrategias realmente contribuyeron
-    strategies_used = set()
-
-    # Generar candidatos con cada estrategia y calcular RRF scores
-    for strategy_name, get_candidates in strategies:
-        try:
-            candidates = get_candidates()
-
-            if candidates:
-                strategies_used.add(strategy_name)
-
-                # RRF: 1/(k + rank) donde rank es 1-indexed
-                for rank_0indexed, release_id in enumerate(candidates):
-                    rank = rank_0indexed + 1  # Convertir a 1-indexed
-                    rrf_scores[release_id] += 1.0 / (k + rank)
-
-        except Exception as e:
-            # Si una estrategia falla, continuar con las demás
-            print(f"Warning: Strategy {strategy_name} failed for user {user_id}: {e}")
-            continue
-
-    # Si no se generaron candidatos, usar popular como fallback
-    if not rrf_scores:
-        candidates = _popular_unseen_releases(user_id, limit)
-        _cache_last_strategy(user_id, "rrf_ensemble_fallback")
-        _cache_last_explanation(user_id, ["Lanzamientos populares (fallback)"])
-        return list(dict.fromkeys(candidates))[:limit]
-
-    # Ordenar releases por RRF score (descendente)
-    ranked_releases = sorted(
-        rrf_scores.items(),
-        key=lambda x: x[1],
-        reverse=True,
+    final_recommendations, explanation, used_fallback = build_rrf_recommendations_from_rankings(
+        user_id,
+        strategy_candidates,
+        strategies_used,
+        limit=limit,
+        k=effective_k,
     )
 
-    # Extraer solo los release_ids en orden
-    candidates = [release_id for release_id, score in ranked_releases]
-
-    # Diversificar por artista
-    diversified = _diversify_by_artist(candidates, limit=limit * 2)
-
-    # Tomar top-K después de diversificar
-    final_recommendations = diversified[:limit]
-
-    # Cachear información
-    _cache_last_strategy(user_id, "rrf_ensemble")
-
-    # Generar explicación según estrategias activas
-    n_algorithms = len(strategies_used)
-    if n_algorithms >= 4:
-        explanation = f"Mejores recomendaciones combinando {n_algorithms} algoritmos (RRF)"
-    elif n_algorithms == 3:
-        explanation = "Recomendaciones combinando 3 algoritmos (RRF)"
-    else:
-        strategy_names = []
-        if "pairs" in strategies_used:
-            strategy_names.append("co-ocurrencia")
-        if "content" in strategies_used:
-            strategy_names.append("contenido")
-        if "nmf" in strategies_used:
-            strategy_names.append("patrones latentes")
-
-        if len(strategy_names) >= 2:
-            explanation = (
-                f"Recomendaciones basadas en {', '.join(strategy_names[:-1])} "
-                f"y {strategy_names[-1]}"
-            )
-        elif len(strategy_names) == 1:
-            explanation = f"Recomendaciones basadas en {strategy_names[0]}"
-        else:
-            explanation = "Recomendaciones personalizadas"
-
+    _cache_last_strategy(
+        user_id,
+        "rrf_ensemble_fallback" if used_fallback else "rrf_ensemble",
+    )
     _cache_last_explanation(user_id, [explanation])
 
     return final_recommendations

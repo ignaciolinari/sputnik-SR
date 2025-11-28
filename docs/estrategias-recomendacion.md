@@ -22,10 +22,10 @@ Este documento describe todas las estrategias de recomendación implementadas en
 ## Max-Ensemble
 
 **Función:** `recommend_max_ensemble(user_id, limit=9)`
-**Estado:** Experimental - En evaluación
+**Estado:** Estable
 **API Endpoint:** `/api/recommend/<user_id>/max_ensemble`
 
-Sistema experimental que combina múltiples estrategias seleccionando el **score máximo** para cada release candidato. A diferencia del híbrido anterior que selecciona UNA estrategia, max-ensemble ejecuta TODAS las estrategias disponibles y toma lo mejor de cada una.
+Sistema que combina múltiples estrategias seleccionando el **score máximo** para cada release candidato. A diferencia del híbrido anterior que selecciona UNA estrategia, max-ensemble ejecuta TODAS las estrategias disponibles y toma lo mejor de cada una.
 
 ### Mecánica
 
@@ -99,20 +99,20 @@ GET /api/recommend/<user_id>/max_ensemble?limit=9&format=full
 
 ## RRF-Ensemble
 
-**Función:** `recommend_rrf_ensemble(user_id, limit=9, k=60)`
-**Estado:** Experimental - En evaluación
+**Función:** `recommend_rrf_ensemble(user_id, limit=9, k=None)`
+**Estado:** Estable (k=10 por defecto, calibrado offline)
 **API Endpoint:** `/api/recommend/<user_id>/rrf_ensemble`
 
-Sistema experimental que combina múltiples estrategias usando **Reciprocal Rank Fusion (RRF)**, una técnica probada en Information Retrieval para fusionar rankings de múltiples fuentes. A diferencia de max-ensemble que toma el score máximo, RRF recompensa el **consenso** entre algoritmos.
+Sistema que combina múltiples estrategias usando **Reciprocal Rank Fusion (RRF)**, una técnica probada en Information Retrieval para fusionar rankings de múltiples fuentes. A diferencia de max-ensemble que toma el score máximo, RRF recompensa el **consenso** entre algoritmos.
 
 ### Mecánica
 
-1. **Genera candidatos** con cada estrategia disponible:
-   - `pairs`: 6x candidatos (peso alto, mejor para 64.7% usuarios)
-   - `content`: 3x candidatos (peso medio, mejor para 26.3% usuarios)
-   - `nmf`: 3x candidatos (disponible desde 20+ ratings)
-   - `two_towers`: 3x candidatos (disponible desde 30+ ratings)
-   - **NOTA:** Popular fue removido porque contamina los resultados (NDCG bajo ~0.22)
+1. **Genera candidatos** con cada estrategia disponible usando el mismo tope (`limit * Config.rrf_candidate_multiplier`, default 4x):
+   - `pairs`
+   - `content`
+   - `nmf` (disponible desde 20+ ratings)
+   - `two_towers` (disponible desde 30+ ratings)
+   - **Popular** solo se usa como fallback cuando no hay señales (cold start) para evitar contaminar el ranking final.
 
 2. **Calcula RRF score** para cada release candidato:
    ```python
@@ -120,7 +120,7 @@ Sistema experimental que combina múltiples estrategias usando **Reciprocal Rank
    ```
    Donde:
    - `rank_i` = posición del item en el ranking i (1-indexed)
-   - `k` = constante de suavizado (default: 60, valor estándar en literatura)
+   - `k` = constante de suavizado (default: 10 en Sputnik; ajustable)
 
 3. **Ordena todos los releases** por RRF score descendente
 
@@ -146,12 +146,12 @@ pairs genera:    Release A (pos 1), Release B (pos 3), Release C (pos 5)
 content genera:  Release B (pos 2), Release C (pos 1), Release D (pos 4)
 nmf genera:      Release A (pos 2), Release D (pos 1), Release E (pos 3)
 
-RRF scores (k=60):
-  A → 1/(60+1) + 1/(60+2) = 0.0164 + 0.0161 = 0.0325
-  B → 1/(60+3) + 1/(60+2) = 0.0159 + 0.0161 = 0.0320
-  C → 1/(60+5) + 1/(60+1) = 0.0154 + 0.0164 = 0.0318
-  D → 1/(60+4) + 1/(60+1) = 0.0156 + 0.0164 = 0.0320
-  E → 1/(60+3) = 0.0159
+RRF scores (k=10):
+  A → 1/(10+1) + 1/(10+2) = 0.0909 + 0.0833 = 0.1742
+  B → 1/(10+3) + 1/(10+2) = 0.0769 + 0.0833 = 0.1602
+  C → 1/(10+5) + 1/(10+1) = 0.0667 + 0.0909 = 0.1576
+  D → 1/(10+4) + 1/(10+1) = 0.0714 + 0.0909 = 0.1623
+  E → 1/(10+3) = 0.0769
 
 Ranking final: [A, B, D, C, E, ...]
 ```
@@ -163,7 +163,7 @@ Ranking final: [A, B, D, C, E, ...]
 1. **Recompensa consenso:** Si múltiples algoritmos coinciden en un release, ese release suma más score
 2. **No requiere normalización:** RRF funciona directamente con rankings, no necesita scores comparables
 3. **Técnica probada:** RRF es estándar en Information Retrieval (usado en sistemas de búsqueda)
-4. **Parámetro k estable:** k=60 es el valor estándar y funciona bien sin tuning
+4. **Parámetro k controlado:** default=10 (podés recalibrarlo con `offline_recommender/search_rrf_k.py` si necesitás otro balance).
 
 ### Comparación con Max-Ensemble
 
@@ -185,11 +185,13 @@ Ranking final: [A, B, D, C, E, ...]
 
 El parámetro `k` controla el "suavizado" del ranking:
 
-- **k bajo (10-20)**: Las top posiciones dominan mucho más
-- **k alto (100+)**: Las posiciones se vuelven más "democráticas"
-- **k=60 (default)**: Valor estándar en literatura (Cormack et al.)
+- **k bajo (5-12)**: Prioriza fuertemente los primeros puestos (default actual: 10).
+- **k medio (15-40)**: Balancea consenso y posición individual.
+- **k alto (60+)**: Pone casi todo el peso en el conteo de apariciones, sin distinguir tanto el orden.
 
-**Impacto:** Valores de k > 30 producen resultados similares. No requiere optimización especial.
+**Tip:** Ejecutá `python offline_recommender/search_rrf_k.py --k-values 5 8 10 12 15 20 30` para evaluar varios valores con el mismo conjunto de usuarios/holdouts y quedarte con el que maximiza NDCG o Hit-Rate.
+
+**Dato reciente:** en la evaluación offline de noviembre 2025 (200 usuarios con ≥40 ratings) `k=10` obtuvo NDCG@9 = 0.6063, superando al resto de los valores probados (5, 8, 9, 11, 12, 13, 15, 20, 30, 45, 60, 100). Por eso quedó como default actual.
 
 ### ¿Por qué funciona?
 
@@ -206,20 +208,17 @@ Cuando múltiples estrategias coinciden en un release, es más probable que sea 
 ```python
 # Via Python
 from app import recommender
-recommendations = recommender.recommend_rrf_ensemble("user_id", limit=9, k=60)
+recommendations = recommender.recommend_rrf_ensemble("user_id", limit=9)
 
 # Via API
-GET /api/recommend/<user_id>/rrf_ensemble?limit=9&k=60&format=full
+GET /api/recommend/<user_id>/rrf_ensemble?limit=9&k=10&format=full
 ```
 
 ### Configuración
 
-- **k**: `60` (constante de suavizado RRF, configurable)
-- **Multiplicadores de candidatos:**
-  - `pairs`: 6x
-  - `content`: 3x
-  - `nmf`: 3x
-  - `two_towers`: 3x
+- **k**: `Config.rrf_default_k` (default: 10, calibrable con `search_rrf_k.py`)
+- **Multiplicadores de candidatos:** `Config.rrf_candidate_multiplier` (default: 4× el `limit` para todas las estrategias)
+- **Pesos por estrategia:** `Config.rrf_strategy_weights` (permite subir/bajar el aporte de cada señal si nuevas métricas lo justifican)
 
 ---
 
@@ -1144,8 +1143,8 @@ python -m offline_recommender.evaluate_recommender \
 
 | Estrategia | Cuándo se usa | Personalización | Complejidad |
 |------------|---------------|-----------------|-------------|
-| **Max-Ensemble** | Experimental | Muy Alta | Media |
-| **RRF-Ensemble** | Experimental | Muy Alta | Media |
+| **Max-Ensemble** | Estable | Muy Alta | Media |
+| **RRF-Ensemble** | Estable | Muy Alta | Media |
 | **Motor Híbrido** | Siempre (principal) | Alta | Alta |
 | **Co-ocurrencia** | ≤8 calificaciones | Media-Alta | Media |
 | **Recomendaciones Avanzadas** | ≥20 calificaciones | Muy Alta | Alta |
