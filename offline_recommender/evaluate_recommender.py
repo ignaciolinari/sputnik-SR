@@ -431,6 +431,7 @@ def evaluate_user(
         systems = [
             ("hybrid", lambda: recommender.recommend(user_id, limit=k)),
             ("max_ensemble", lambda: recommender.recommend_max_ensemble(user_id, limit=k)),
+            ("rrf_ensemble", lambda: recommender.recommend_rrf_ensemble(user_id, limit=k)),
             ("advanced", lambda: recommender.recommend_advanced(user_id, limit=k)),
             ("nmf", lambda: recommender.recommend_nmf(user_id, limit=k)),
             ("two_towers", lambda: recommender.recommend_two_towers(user_id, limit=k)),
@@ -461,6 +462,7 @@ def evaluate_user(
         # Extraer resultados
         recommended_hybrid = recommendations.get("hybrid", [])
         recommended_max_ensemble = recommendations.get("max_ensemble", [])
+        recommended_rrf_ensemble = recommendations.get("rrf_ensemble", [])
         recommended_advanced = recommendations.get("advanced", [])
         recommended_nmf = recommendations.get("nmf", [])
         recommended_two_towers = recommendations.get("two_towers", [])
@@ -474,6 +476,7 @@ def evaluate_user(
     all_recommended_ids = set()
     all_recommended_ids.update(recommended_hybrid)
     all_recommended_ids.update(recommended_max_ensemble)
+    all_recommended_ids.update(recommended_rrf_ensemble)
     all_recommended_ids.update(recommended_advanced)
     all_recommended_ids.update(recommended_nmf)
     all_recommended_ids.update(recommended_two_towers)
@@ -549,6 +552,17 @@ def evaluate_user(
         calculate_metrics(
             recommended_max_ensemble,
             "max_ensemble",
+            relevance_set,
+            release_to_genres,
+            release_to_artist,
+            release_to_ratings_count,
+            max_ratings_count,
+        )
+    )
+    result.update(
+        calculate_metrics(
+            recommended_rrf_ensemble,
+            "rrf_ensemble",
             relevance_set,
             release_to_genres,
             release_to_artist,
@@ -638,6 +652,7 @@ def evaluate_user(
     del (
         recommended_hybrid,
         recommended_max_ensemble,
+        recommended_rrf_ensemble,
         recommended_advanced,
         recommended_nmf,
         recommended_two_towers,
@@ -773,14 +788,15 @@ def _evaluate_user_chunk(args: tuple) -> List[dict]:
                     # Logging progreso cada 100 usuarios o si verbose
                     if verbose or idx % 100 == 0:
                         LOGGER.info(
-                            "Chunk %d: [%d/%d] %s -> NDCG max_ensemble=%.4f hybrid=%.4f "
-                            "advanced=%.4f nmf=%.4f two_towers=%.4f pairs=%.4f content=%.4f "
+                            "Chunk %d: [%d/%d] %s -> NDCG max=%.4f rrf=%.4f hybrid=%.4f "
+                            "advanced=%.4f nmf=%.4f tt=%.4f pairs=%.4f content=%.4f "
                             "random=%.4f popular=%.4f",
                             chunk_id,
                             idx,
                             total_users,
                             user_id,
                             result.get("max_ensemble_ndcg", 0.0) if result else 0.0,
+                            result.get("rrf_ensemble_ndcg", 0.0) if result else 0.0,
                             result.get("hybrid_ndcg", 0.0) if result else 0.0,
                             result.get("advanced_ndcg", 0.0) if result else 0.0,
                             result.get("nmf_ndcg", 0.0) if result else 0.0,
@@ -1065,6 +1081,7 @@ def evaluate(
         "content",
         "random",
         "popular",
+        "rrf_ensemble",
     ]
     metric_names = [
         "ndcg",

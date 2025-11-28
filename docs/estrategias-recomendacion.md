@@ -5,16 +5,17 @@ Este documento describe todas las estrategias de recomendación implementadas en
 ## Tabla de Contenidos
 
 1. [Max-Ensemble](#max-ensemble)
-2. [Motor Híbrido](#motor-híbrido)
-3. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
-4. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
-5. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
-6. [Two Towers (Deep Learning)](#two-towers-deep-learning)
-7. [Perfiles de Contenido](#perfiles-de-contenido)
-8. [Popularidad](#popularidad)
-9. [Exploración Aleatoria](#exploración-aleatoria)
-10. [Recomendaciones Contextuales](#recomendaciones-contextuales)
-11. [Métricas de Evaluación](#métricas-de-evaluación)
+2. [RRF-Ensemble](#rrf-ensemble)
+3. [Motor Híbrido](#motor-híbrido)
+4. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
+5. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
+6. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
+7. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+8. [Perfiles de Contenido](#perfiles-de-contenido)
+9. [Popularidad](#popularidad)
+10. [Exploración Aleatoria](#exploración-aleatoria)
+11. [Recomendaciones Contextuales](#recomendaciones-contextuales)
+12. [Métricas de Evaluación](#métricas-de-evaluación)
 
 ---
 
@@ -93,6 +94,132 @@ recommendations = recommender.recommend_max_ensemble("user_id", limit=9)
 # Via API
 GET /api/recommend/<user_id>/max_ensemble?limit=9&format=full
 ```
+
+---
+
+## RRF-Ensemble
+
+**Función:** `recommend_rrf_ensemble(user_id, limit=9, k=60)`
+**Estado:** Experimental - En evaluación
+**API Endpoint:** `/api/recommend/<user_id>/rrf_ensemble`
+
+Sistema experimental que combina múltiples estrategias usando **Reciprocal Rank Fusion (RRF)**, una técnica probada en Information Retrieval para fusionar rankings de múltiples fuentes. A diferencia de max-ensemble que toma el score máximo, RRF recompensa el **consenso** entre algoritmos.
+
+### Mecánica
+
+1. **Genera candidatos** con cada estrategia disponible:
+   - `pairs`: 6x candidatos (peso alto, mejor para 64.7% usuarios)
+   - `content`: 3x candidatos (peso medio, mejor para 26.3% usuarios)
+   - `nmf`: 3x candidatos (disponible desde 20+ ratings)
+   - `two_towers`: 3x candidatos (disponible desde 30+ ratings)
+   - **NOTA:** Popular fue removido porque contamina los resultados (NDCG bajo ~0.22)
+
+2. **Calcula RRF score** para cada release candidato:
+   ```python
+   RRF_score(item) = Σ 1/(k + rank_i)
+   ```
+   Donde:
+   - `rank_i` = posición del item en el ranking i (1-indexed)
+   - `k` = constante de suavizado (default: 60, valor estándar en literatura)
+
+3. **Ordena todos los releases** por RRF score descendente
+
+4. **Diversifica por artista** y retorna top-K
+
+### Adaptabilidad Automática
+
+El sistema se adapta según las interacciones del usuario:
+
+| Interacciones | Estrategias Activas | Comportamiento |
+|---------------|---------------------|----------------|
+| **0** | Popular (fallback) | Cold start |
+| **1-19** | pairs + content | Combina co-ocurrencia y contenido |
+| **20-29** | pairs + content + nmf | Agrega factorización matricial |
+| **30+** | pairs + content + nmf + two_towers | Todas las estrategias disponibles |
+
+### Ejemplo Concreto
+
+Usuario con 25 ratings positivos:
+
+```
+pairs genera:    Release A (pos 1), Release B (pos 3), Release C (pos 5)
+content genera:  Release B (pos 2), Release C (pos 1), Release D (pos 4)
+nmf genera:      Release A (pos 2), Release D (pos 1), Release E (pos 3)
+
+RRF scores (k=60):
+  A → 1/(60+1) + 1/(60+2) = 0.0164 + 0.0161 = 0.0325
+  B → 1/(60+3) + 1/(60+2) = 0.0159 + 0.0161 = 0.0320
+  C → 1/(60+5) + 1/(60+1) = 0.0154 + 0.0164 = 0.0318
+  D → 1/(60+4) + 1/(60+1) = 0.0156 + 0.0164 = 0.0320
+  E → 1/(60+3) = 0.0159
+
+Ranking final: [A, B, D, C, E, ...]
+```
+
+**Observación:** Release A aparece en posición alta en pairs y nmf, por lo que suma más RRF score que los demás.
+
+### Ventajas sobre Max-Ensemble
+
+1. **Recompensa consenso:** Si múltiples algoritmos coinciden en un release, ese release suma más score
+2. **No requiere normalización:** RRF funciona directamente con rankings, no necesita scores comparables
+3. **Técnica probada:** RRF es estándar en Information Retrieval (usado en sistemas de búsqueda)
+4. **Parámetro k estable:** k=60 es el valor estándar y funciona bien sin tuning
+
+### Comparación con Max-Ensemble
+
+| Aspecto | Max-Ensemble | RRF-Ensemble |
+|---------|--------------|--------------|
+| **Filosofía** | "El mejor score gana" | "Consenso entre algoritmos" |
+| **Cuando funciona mejor** | Un algoritmo tiene alta confianza | Múltiples algoritmos coinciden |
+| **NDCG promedio** | ~0.5835 | ~0.5780 (prácticamente empate) |
+| **Ventaja** | Preserva scores altos individuales | Detecta consenso entre fuentes |
+| **Complejidad** | Simple (MAX) | Media (suma de recíprocos) |
+
+**Resultados de evaluación (200 usuarios):**
+- Max gana: 40.0% de usuarios
+- RRF gana: 32.5% de usuarios
+- Empates: 27.5% de usuarios
+- Diferencia promedio: -0.0055 (prácticamente empate)
+
+### Parámetro k
+
+El parámetro `k` controla el "suavizado" del ranking:
+
+- **k bajo (10-20)**: Las top posiciones dominan mucho más
+- **k alto (100+)**: Las posiciones se vuelven más "democráticas"
+- **k=60 (default)**: Valor estándar en literatura (Cormack et al.)
+
+**Impacto:** Valores de k > 30 producen resultados similares. No requiere optimización especial.
+
+### ¿Por qué funciona?
+
+**Complementariedad con consenso:** Diferentes estrategias capturan diferentes aspectos:
+- `pairs`: Conexiones directas entre discos
+- `content`: Preferencias por géneros/artistas
+- `nmf`: Patrones latentes de preferencias
+- `two_towers`: Aprendizaje profundo con features
+
+Cuando múltiples estrategias coinciden en un release, es más probable que sea relevante para el usuario.
+
+### Uso
+
+```python
+# Via Python
+from app import recommender
+recommendations = recommender.recommend_rrf_ensemble("user_id", limit=9, k=60)
+
+# Via API
+GET /api/recommend/<user_id>/rrf_ensemble?limit=9&k=60&format=full
+```
+
+### Configuración
+
+- **k**: `60` (constante de suavizado RRF, configurable)
+- **Multiplicadores de candidatos:**
+  - `pairs`: 6x
+  - `content`: 3x
+  - `nmf`: 3x
+  - `two_towers`: 3x
 
 ---
 
@@ -962,7 +1089,12 @@ Evalúa los sistemas de recomendación usando holdout de interacciones:
 1. **Selección de usuarios:** Usuarios con al menos `min_ratings` calificaciones
 2. **Split de datos:** Separa `holdout_ratio` de las interacciones para testing
 3. **Evaluación:** Calcula NDCG@k para cada estrategia:
+   - Max-Ensemble
+   - RRF-Ensemble
    - Hybrid
+   - Advanced (NMF + Two Towers)
+   - NMF
+   - Two Towers
    - Pairs
    - Content-based
    - Random
@@ -1012,6 +1144,8 @@ python -m offline_recommender.evaluate_recommender \
 
 | Estrategia | Cuándo se usa | Personalización | Complejidad |
 |------------|---------------|-----------------|-------------|
+| **Max-Ensemble** | Experimental | Muy Alta | Media |
+| **RRF-Ensemble** | Experimental | Muy Alta | Media |
 | **Motor Híbrido** | Siempre (principal) | Alta | Alta |
 | **Co-ocurrencia** | ≤8 calificaciones | Media-Alta | Media |
 | **Recomendaciones Avanzadas** | ≥20 calificaciones | Muy Alta | Alta |
@@ -1082,14 +1216,18 @@ User-based CF sería beneficioso si:
 ## Referencias
 
 - Implementación: `app/recommender.py`
+- Max-Ensemble: `recommend_max_ensemble()` - combina estrategias por score máximo
+- RRF-Ensemble: `recommend_rrf_ensemble()` - combina estrategias por consenso (RRF)
 - Recomendaciones avanzadas: `recommend_advanced()` - combina NMF + Two Towers
 - Actualización de embeddings bajo demanda: `app/nmf_update.py`, `app/two_towers_update.py`
 - Endpoint unificado: `POST /actualizar-recomendaciones-avanzadas` en `app/app.py`
+- Endpoints de ensambles: `/api/recommend/<user_id>/max_ensemble`, `/api/recommend/<user_id>/rrf_ensemble` en `app/app.py`
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
 - Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
 - Construcción de embeddings Two Towers: `offline_recommender/build_two_towers.py`
-- Evaluación: `offline_recommender/evaluate_recommender.py`
+- Evaluación: `offline_recommender/evaluate_recommender.py` (evalúa max_ensemble y rrf_ensemble)
 - Métricas: `app/metrics.py`
 - Análisis NMF: `docs/analisis-svd-nmf.md`
 - Guía NMF: `docs/guia-nmf.md`
 - Análisis de potencial user-based CF: `offline_recommender/analyze_user_cf_potential.py`
+- Análisis de evaluaciones: `notebooks/analisis_evaluacion_recomendaciones.ipynb`

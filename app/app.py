@@ -413,6 +413,74 @@ def api_recommend_max_ensemble(user_id: str):
         return jsonify({"error": str(e), "user_id": user_id}), 500
 
 
+@app.get("/api/recommend/<user_id>/rrf_ensemble")
+def api_recommend_rrf_ensemble(user_id: str):
+    """
+    API endpoint para obtener recomendaciones usando RRF Ensemble.
+
+    Reciprocal Rank Fusion combina rankings de múltiples algoritmos:
+    - pairs: co-ocurrencia
+    - content: géneros/artistas similares
+    - popular: releases populares
+    - nmf: factorización matricial (20+ ratings)
+    - two_towers: deep learning (30+ ratings)
+
+    RRF_score(item) = Σ 1/(k + rank)
+
+    Parámetros:
+        - limit: Número de recomendaciones (default: 9)
+        - k: Constante de suavizado RRF (default: 60)
+        - format: 'ids' o 'full' (default: 'full')
+
+    Ejemplo:
+        GET /api/recommend/user123/rrf_ensemble?limit=9&k=60&format=full
+    """
+    limit = request.args.get("limit", default=9, type=int)
+    k = request.args.get("k", default=60, type=int)
+    response_format = request.args.get("format", default="full", type=str)
+
+    # Validar parámetros
+    if limit < 1 or limit > 100:
+        return jsonify({"error": "limit must be between 1 and 100"}), 400
+    if k < 1 or k > 1000:
+        return jsonify({"error": "k must be between 1 and 1000"}), 400
+
+    try:
+        # Generar recomendaciones con RRF ensemble
+        release_ids = recommender.recommend_rrf_ensemble(user_id, limit=limit, k=k)
+
+        # Formato de respuesta
+        if response_format == "ids":
+            # Solo IDs
+            return jsonify(
+                {
+                    "user_id": user_id,
+                    "strategy": "rrf_ensemble",
+                    "k": k,
+                    "recommendations": release_ids,
+                    "count": len(release_ids),
+                }
+            )
+        else:
+            # Información completa de releases
+            releases = recommender.release_details(release_ids)
+            explanations = recommender.last_explanations(user_id)
+
+            return jsonify(
+                {
+                    "user_id": user_id,
+                    "strategy": "rrf_ensemble",
+                    "k": k,
+                    "recommendations": releases,
+                    "explanations": explanations,
+                    "count": len(releases),
+                }
+            )
+
+    except Exception as e:
+        return jsonify({"error": str(e), "user_id": user_id}), 500
+
+
 @app.post("/recomendaciones")
 def submit_ratings():
     user_id = request.cookies.get("id_usuario")
