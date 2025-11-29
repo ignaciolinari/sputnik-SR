@@ -16,6 +16,10 @@ Este documento describe todas las estrategias de recomendación implementadas en
 10. [Exploración Aleatoria](#exploración-aleatoria)
 11. [Recomendaciones Contextuales](#recomendaciones-contextuales)
 12. [Métricas de Evaluación](#métricas-de-evaluación)
+13. [Configuración Global](#configuración-global)
+14. [Resumen de Estrategias](#resumen-de-estrategias)
+15. [Estrategias Futuras](#estrategias-futuras)
+16. [Referencias](#referencias)
 
 ---
 
@@ -294,12 +298,14 @@ Cuando ambos sistemas están disponibles en nivel 2:
    - Cada candidato recibe un score normalizado [0, 1] basado en su posición
    - Mejor posición = score más alto (1.0 para el primero)
 
-3. **Combina scores con pesos:**
+3. **Combina scores con pesos dinámicos:**
    ```python
-   combined_score = (
-       0.4 * nmf_score +           # 40% peso para NMF
-       0.6 * two_towers_score      # 60% peso para Two Towers
-   )
+   # Los pesos se ajustan según el historial del usuario:
+   # - 30-50 ratings: 50% NMF, 50% Two Towers
+   # - 51-100 ratings: 40% NMF, 60% Two Towers
+   # - 101-200 ratings: 30% NMF, 70% Two Towers
+   # - 201+ ratings: 20% NMF, 80% Two Towers
+   combined_score = nmf_weight * nmf_score + two_towers_weight * two_towers_score
    ```
 
 4. **Aplica bonus de consenso:**
@@ -340,8 +346,7 @@ El endpoint detecta automáticamente el nivel del usuario y actualiza los sistem
 
 - **`min_advanced_level_1_signals`**: `20` - Umbral para nivel 1 (NMF)
 - **`min_advanced_level_2_signals`**: `30` - Umbral para nivel 2 (NMF + Two Towers)
-- **`advanced_nmf_weight`**: `0.4` - Peso de NMF en combinación
-- **`advanced_two_towers_weight`**: `0.6` - Peso de Two Towers en combinación
+- **Pesos dinámicos**: Se ajustan según el historial (ver sección anterior)
 - **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos en ambos sistemas
 
 ---
@@ -1091,6 +1096,29 @@ NDCG = DCG / IDCG
 - **1.0**: Ranking perfecto
 - **0.0**: Ranking sin elementos relevantes o peor que aleatorio
 
+### Precision@k, Recall@k y F1@k
+
+**Funciones:** `precision_at_k()`, `recall_at_k()`, `f1_at_k()`
+
+Métricas clásicas de recuperación de información:
+
+- **Precision@k**: Proporción de recomendaciones relevantes en top-k
+- **Recall@k**: Proporción de items relevantes recuperados en top-k
+- **F1@k**: Media armónica de Precision@k y Recall@k
+
+### MRR (Mean Reciprocal Rank)
+
+**Función:** `mean_reciprocal_rank(recommended, relevant)`
+
+Inverso de la posición del primer item relevante. Útil para evaluar qué tan rápido el sistema encuentra algo relevante.
+
+### Métricas de Diversidad y Novedad
+
+- **Genre Diversity**: Proporción de géneros únicos en las recomendaciones
+- **Artist Diversity**: Proporción de artistas únicos en las recomendaciones
+- **Novelty**: Promedio de -log2(popularidad) de los items recomendados (items menos populares = mayor novedad)
+- **Coverage**: Proporción del catálogo que puede ser recomendado (acumulado de todos los usuarios)
+
 ### Evaluación Offline
 
 **Script:** `offline_recommender/evaluate_recommender.py`
@@ -1135,8 +1163,7 @@ python -m offline_recommender.evaluate_recommender \
 - **`max_pairs_signals`**: `8` - Umbral para cambiar de co-ocurrencia a contenido
 - **`min_advanced_level_1_signals`**: `20` - Umbral para activar recomendaciones avanzadas nivel 1 (NMF)
 - **`min_advanced_level_2_signals`**: `30` - Umbral para activar recomendaciones avanzadas nivel 2 (NMF + Two Towers)
-- **`advanced_nmf_weight`**: `0.4` - Peso de NMF en combinación nivel 2
-- **`advanced_two_towers_weight`**: `0.6` - Peso de Two Towers en combinación nivel 2
+- **Pesos dinámicos en nivel 2**: 50/50 → 40/60 → 30/70 → 20/80 según cantidad de ratings (favorece Two Towers progresivamente)
 - **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos que aparecen en ambos sistemas
 - **`min_two_towers_signals`**: `10` - Umbral legacy (mantenido para compatibilidad)
 - **`min_nmf_signals`**: `20` - Umbral legacy (mantenido para compatibilidad)
@@ -1173,7 +1200,7 @@ python -m offline_recommender.evaluate_recommender \
 
 ### Filtrado Colaborativo Basado en Usuarios (User-Based CF)
 
-**Estado**: No implementado debido al aumento de peso de la db y no aportaba mas señal que item based-CF - Consideración futura
+**Estado**: No implementado debido al aumento de peso de la db y que no aportaba mas señal que item based-CF - Consideración futura
 
 El sistema actual utiliza filtrado colaborativo basado en items (item-based CF) a través de la tabla `release_pairs`. Una posible extensión sería implementar filtrado colaborativo basado en usuarios (user-based CF).
 
