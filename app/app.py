@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
-LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "23/11/2025")
+LAST_APP_UPDATE = os.getenv("SPUTNIK_LAST_UPDATE", "29/11/2025")
 
 
 RATING_CHOICES = [
@@ -226,7 +226,13 @@ def recommendations():
                 "prev_page_url": prev_page_url,
             }
 
-    release_ids = recommender.recommend_max_ensemble(user_id)
+    primary_strategy = "rrf_ensemble"
+    try:
+        release_ids = recommender.recommend_rrf_ensemble(user_id)
+    except Exception:
+        app.logger.exception("Fallo RRF, usando Max-Ensemble como fallback")
+        release_ids = recommender.recommend_max_ensemble(user_id)
+        primary_strategy = "max_ensemble_fallback"
 
     # Batch insert para marcar releases como vistos (más eficiente que loop)
     if release_ids:
@@ -316,6 +322,7 @@ def recommendations():
         advanced_next_level_signals=next_level_signals,
         has_advanced_embedding=has_advanced_embedding,
         has_two_towers_embedding=has_two_towers_embedding,
+        primary_strategy=primary_strategy,
     )
 
 

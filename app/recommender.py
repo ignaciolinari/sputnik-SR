@@ -2606,19 +2606,37 @@ def current_database_info() -> dict:
 
 _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
     {
-        "id": "max_ensemble",
-        "name": "Max-Ensemble",
+        "id": "rrf_ensemble",
+        "name": "RRF Ensemble",
         "description": (
-            "Estrategia principal que combina todas las técnicas disponibles "
-            "y selecciona las mejores recomendaciones."
+            "Estrategia principal: fusiona pairs, contenido, NMF y Two Towers "
+            "con Reciprocal Rank Fusion para recompensar el consenso."
         ),
         "is_primary": True,
+        "tooltip_detail": {
+            "nmf": (
+                "Necesita que actives/actualices recomendaciones avanzadas una vez "
+                "que juntás 20+ calificaciones positivas."
+            ),
+            "two_towers": (
+                "Disponible tras 30+ calificaciones y una actualización manual del botón "
+                "de recomendaciones avanzadas."
+            ),
+        },
+    },
+    {
+        "id": "max_ensemble",
+        "name": "Max-Ensemble (fallback)",
+        "description": (
+            "Mezcla clásica basada en el score máximo de cada algoritmo. "
+            "Se usa sólo si RRF no está disponible."
+        ),
     },
     {
         "id": "advanced",
         "name": "Recomendaciones Avanzadas",
         "description": (
-            "Genera embeddings personalizados basados en tu historial. "
+            "Genera embeddings personalizados que alimentan RRF y Two Towers. "
             "Se actualiza a pedido del usuario."
         ),
         "tooltip_detail": {

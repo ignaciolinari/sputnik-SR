@@ -47,6 +47,23 @@
             </span>
             {% endif %}
         </h1>
+        <div class="mt-3 w-full max-w-3xl text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-3 py-2 leading-relaxed">
+            <span class="font-semibold text-slate-800">Recomendaciones avanzadas:</span>
+            {% if advanced_level == 0 %}
+                Necesitás {{ advanced_next_level_signals }} calificaciones positivas (te faltan {{ advanced_next_level_signals - advanced_current_signals }}) para generar tus embeddings personalizados.
+                Una vez creados, RRF suma señales más confiables porque aprende realmente de tu gusto.
+            {% elif advanced_level == 1 and not has_advanced_embedding %}
+                Ya desbloqueaste el nivel 1. Generá tus embeddings NMF para que RRF utilice patrones latentes más precisos; el botón tarda unos segundos y vale la pena hacerlo apenas juntás suficientes puntuaciones.
+            {% elif advanced_level == 1 %}
+                Tus embeddings NMF están activos. Sumá ~10 calificaciones nuevas y luego tocá “Actualizar avanzadas” para que sigan frescos.
+                Te faltan {{ advanced_next_level_signals - advanced_current_signals }} positivas para habilitar Two Towers (Nivel 2).
+            {% elif advanced_level >= 2 and not has_two_towers_embedding %}
+                Desbloqueaste el nivel 2: generá/actualizá tus embeddings de Two Towers para sumar la señal de aprendizaje profundo.
+                Después de cada ~10 calificaciones nuevas volvé a regenerarlos para mantener la precisión.
+            {% else %}
+                Tenés NMF + Two Towers activos. Cada vez que agregues más o menos unas 10 calificaciones nuevas, usá “Actualizar avanzadas” para regenerar tus embeddings y mantener recomendaciones cada vez más confiables.
+            {% endif %}
+        </div>
         <div class="text-sm text-slate-600">
             {{ seen_count }} vistos &bull; {{ rated_count }} valorados &mdash;
             <a href="/reset" data-action="reset-history" class="bg-teal-500 text-white font-semibold text-xs px-3 py-1 rounded hover:bg-teal-600">Limpiar historial</a>
@@ -57,6 +74,16 @@
         <div class="flex items-center gap-3 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm shadow-sm">
             <span class="uppercase text-xs font-semibold tracking-wide text-amber-700">Estado</span>
             <span>Última actualización: {{ last_update_display }}</span>
+        </div>
+        <div class="flex items-center gap-3 px-4 py-3 bg-white border border-teal-200 rounded-lg text-teal-900 text-sm shadow-sm">
+            <span class="uppercase text-xs font-semibold tracking-wide text-teal-700">Motor activo</span>
+            <span>
+                {% if primary_strategy == 'rrf_ensemble' %}
+                    RRF Ensemble · consenso multi-estrategia
+                {% else %}
+                    Max-Ensemble (fallback automático)
+                {% endif %}
+            </span>
         </div>
         <button type="button" data-action="show-system-info" class="px-4 py-2 border border-teal-500 text-teal-600 font-semibold text-sm rounded hover:bg-teal-50 focus:outline-none focus:ring-2 focus:ring-teal-500" aria-haspopup="dialog" aria-controls="info-modal">
             Más información
