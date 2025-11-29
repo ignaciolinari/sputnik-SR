@@ -4,96 +4,18 @@ Este documento describe todas las estrategias de recomendación implementadas en
 
 ## Tabla de Contenidos
 
-1. [Max-Ensemble](#max-ensemble)
-2. [RRF-Ensemble](#rrf-ensemble)
+1. [RRF-Ensemble](#rrf-ensemble)
+2. [Max-Ensemble](#max-ensemble)
 3. [Motor Híbrido](#motor-híbrido)
-4. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
-5. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
-6. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
-7. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+4. [Recomendaciones Avanzadas (NMF + Two Towers)](#recomendaciones-avanzadas-nmf--two-towers)
+5. [Factorización Matricial (NMF)](#factorización-matricial-nmf)
+6. [Two Towers (Deep Learning)](#two-towers-deep-learning)
+7. [Co-ocurrencia (release_pairs)](#co-ocurrencia-release_pairs)
 8. [Perfiles de Contenido](#perfiles-de-contenido)
 9. [Popularidad](#popularidad)
 10. [Exploración Aleatoria](#exploración-aleatoria)
 11. [Recomendaciones Contextuales](#recomendaciones-contextuales)
 12. [Métricas de Evaluación](#métricas-de-evaluación)
-
----
-
-## Max-Ensemble
-
-**Función:** `recommend_max_ensemble(user_id, limit=9)`
-**Estado:** Estable
-**API Endpoint:** `/api/recommend/<user_id>/max_ensemble`
-
-Sistema que combina múltiples estrategias seleccionando el **score máximo** para cada release candidato. A diferencia del híbrido anterior que selecciona UNA estrategia, max-ensemble ejecuta TODAS las estrategias disponibles y toma lo mejor de cada una.
-
-### Mecánica
-
-1. **Genera candidatos** con cada estrategia disponible:
-   - `pairs`: 3x candidatos (peso alto, mejor para 64.7% usuarios)
-   - `content`: 1.5x candidatos (peso medio, mejor para 26.3% usuarios)
-   - `advanced`: 1x candidatos (peso base, mejor para 6.5% usuarios)
-
-2. **Para cada release candidato**, guarda el score MÁS ALTO entre todas las estrategias
-
-3. **Ordena todos los releases** por su score máximo
-
-4. **Diversifica por artista** y retorna top-K
-
-### Adaptabilidad Automática
-
-El sistema se adapta según las interacciones del usuario:
-
-| Interacciones | Estrategias Activas | Comportamiento |
-|---------------|---------------------|----------------|
-| **0** | Popular | Cold start (igual que híbrido) |
-| **1-19** | pairs + content | Combina co-ocurrencia y contenido |
-| **20+** | pairs + content + advanced | Todas las estrategias disponibles |
-
-### Ejemplo Concreto
-
-Usuario con 25 ratings positivos:
-
-```
-pairs genera:    Release A: 0.95, Release B: 0.80
-content genera:  Release B: 0.70, Release C: 0.85
-advanced genera: Release A: 0.50, Release D: 0.75
-
-Max-Ensemble combina:
-  A → MAX(0.95, 0.50) = 0.95 ✓ (preserva el mejor)
-  C → 0.85 ✓
-  B → MAX(0.80, 0.70) = 0.80 ✓
-  D → 0.75 ✓
-
-Ranking final: [A, C, B, D, ...]
-```
-
-### Ventajas sobre Híbrido anterior
-
-1. **No elige una sola estrategia:** Aprovecha fortalezas de todas simultáneamente
-2. **Sin promedios que diluyan:** Preserva los mejores scores de cada estrategia
-3. **Diversidad implícita:** Diferentes releases pueden venir de diferentes estrategias
-4. **Sin hiperparámetros:** No requiere calibrar pesos ni umbrales
-
-### ¿Por qué funciona mejor?
-
-**Complementariedad real:** Diferentes estrategias son mejores para diferentes usuarios:
-- `pairs` funciona mejor para 64.7% de usuarios
-- `content` funciona mejor para 26.3% de usuarios
-- `advanced` funciona mejor para 6.5% de usuarios
-
-El máximo captura el "ganador" para cada release, mientras que el híbrido anterior elegía una sola estrategia para todo el usuario.
-
-### Uso
-
-```python
-# Via Python
-from app import recommender
-recommendations = recommender.recommend_max_ensemble("user_id", limit=9)
-
-# Via API
-GET /api/recommend/<user_id>/max_ensemble?limit=9&format=full
-```
 
 ---
 
@@ -120,7 +42,7 @@ Sistema que combina múltiples estrategias usando **Reciprocal Rank Fusion (RRF)
    ```
    Donde:
    - `rank_i` = posición del item en el ranking i (1-indexed)
-   - `k` = constante de suavizado (default: 10 en Sputnik; ajustable)
+   - `k` = constante de suavizado (default: 10 en Sputnik; optimizado para este caso pero es ajustable)
 
 3. **Ordena todos los releases** por RRF score descendente
 
@@ -222,11 +144,89 @@ GET /api/recommend/<user_id>/rrf_ensemble?limit=9&k=10&format=full
 
 ---
 
+## Max-Ensemble
+
+**Función:** `recommend_max_ensemble(user_id, limit=9)`
+**Estado:** Estable
+**API Endpoint:** `/api/recommend/<user_id>/max_ensemble`
+
+Sistema que combina múltiples estrategias seleccionando el **score máximo** para cada release candidato. A diferencia del híbrido anterior que selecciona UNA estrategia, max-ensemble ejecuta TODAS las estrategias disponibles y toma lo mejor de cada una.
+
+### Mecánica
+
+1. **Genera candidatos** con cada estrategia disponible:
+   - `pairs`: 3x candidatos (peso alto, mejor para 64.7% usuarios)
+   - `content`: 1.5x candidatos (peso medio, mejor para 26.3% usuarios)
+   - `advanced`: 1x candidatos (peso base, mejor para 6.5% usuarios)
+
+2. **Para cada release candidato**, guarda el score MÁS ALTO entre todas las estrategias
+
+3. **Ordena todos los releases** por su score máximo
+
+4. **Diversifica por artista** y retorna top-K
+
+### Adaptabilidad Automática
+
+El sistema se adapta según las interacciones del usuario:
+
+| Interacciones | Estrategias Activas | Comportamiento |
+|---------------|---------------------|----------------|
+| **0** | Popular | Cold start (igual que híbrido) |
+| **1-19** | pairs + content | Combina co-ocurrencia y contenido |
+| **20+** | pairs + content + advanced | Todas las estrategias disponibles |
+
+### Ejemplo Concreto
+
+Usuario con 25 ratings positivos:
+
+```
+pairs genera:    Release A: 0.95, Release B: 0.80
+content genera:  Release B: 0.70, Release C: 0.85
+advanced genera: Release A: 0.50, Release D: 0.75
+
+Max-Ensemble combina:
+  A → MAX(0.95, 0.50) = 0.95 ✓ (preserva el mejor)
+  C → 0.85 ✓
+  B → MAX(0.80, 0.70) = 0.80 ✓
+  D → 0.75 ✓
+
+Ranking final: [A, C, B, D, ...]
+```
+
+### Ventajas sobre Híbrido anterior
+
+1. **No elige una sola estrategia:** Aprovecha fortalezas de todas simultáneamente
+2. **Sin promedios que diluyan:** Preserva los mejores scores de cada estrategia
+3. **Diversidad implícita:** Diferentes releases pueden venir de diferentes estrategias
+4. **Sin hiperparámetros:** No requiere calibrar pesos ni umbrales
+
+### ¿Por qué funciona mejor?
+
+**Complementariedad real:** Diferentes estrategias son mejores para diferentes usuarios:
+- `pairs` funciona mejor para 64.7% de usuarios
+- `content` funciona mejor para 26.3% de usuarios
+- `advanced` funciona mejor para 6.5% de usuarios
+
+El máximo captura el "ganador" para cada release, mientras que el híbrido anterior elegía una sola estrategia para todo el usuario.
+
+### Uso
+
+```python
+# Via Python
+from app import recommender
+recommendations = recommender.recommend_max_ensemble("user_id", limit=9)
+
+# Via API
+GET /api/recommend/<user_id>/max_ensemble?limit=9&format=full
+```
+
+---
+
 ## Motor Híbrido
 
 **Función:** `recommend(user_id, limit=9)`
 
-El motor híbrido es la estrategia principal que combina todas las demás estrategias según el historial del usuario. Selecciona automáticamente la mejor estrategia disponible y usa fallbacks cuando es necesario.
+El motor híbrido combina todas las demás estrategias según el historial del usuario. Selecciona automáticamente la mejor estrategia disponible y usa fallbacks cuando es necesario.
 
 ### Lógica de Decisión
 
@@ -266,108 +266,6 @@ Usuario con 5 calificaciones positivas:
 3. Diversifica por artista → reordena para evitar repeticiones
 4. Devuelve top 9 recomendaciones
 ```
-
----
-
-## Co-ocurrencia (release_pairs)
-
-**Función:** `recommend_from_pairs(user_id, limit=9)`
-
-Sistema basado en la frecuencia con que los discos aparecen juntos en las colecciones de los usuarios. Ideal para usuarios con pocas calificaciones (≤8).
-
-### Construcción de la Tabla `release_pairs` (Offline)
-
-**Script:** `offline_recommender/build_release_pairs.py`
-
-#### Proceso:
-
-1. **Análisis de interacciones positivas:**
-   - Filtra todas las interacciones con `rating >= 3.0` (configurable)
-   - Crea una tabla temporal con `(usuario, disco)` para calificaciones positivas
-
-2. **Cálculo de co-ocurrencias:**
-   - Para cada par de discos (A, B), cuenta cuántos usuarios calificaron ambos
-   - Procesa en lotes para eficiencia (batch_size=250 por defecto)
-
-3. **Cálculo de métricas:**
-   - **`pair_count`**: Cantidad de usuarios que calificaron ambos discos
-   - **`jaccard`**: Similitud entre conjuntos de usuarios
-     ```
-     jaccard = pair_count / (usuarios_A + usuarios_B - pair_count)
-     ```
-   - **`lift`**: Medida de asociación estadística
-     ```
-     lift = pair_count / (usuarios_A * usuarios_B)
-     ```
-
-4. **Filtrado:**
-   - Solo guarda pares con `pair_count >= 3` (configurable con `--min-pair-count`)
-   - La tabla es bidireccional: si existe (A, B), también existe (B, A)
-
-### Recomendación en Tiempo Real
-
-#### Algoritmo `_score_pairs()`:
-
-1. **Obtiene anchors:** Los discos que el usuario calificó positivamente
-
-2. **Busca relaciones:** Encuentra todos los discos relacionados en `release_pairs`
-
-3. **Calcula score para cada candidato:**
-   ```python
-   score = rating_weight * recency_weight * pair_count *
-           (0.7 + 0.3 * lift) * (0.5 + 0.5 * jaccard)
-   ```
-
-   **Componentes:**
-   - **`rating_weight`**: `max(0.1, rating / 5.0)` - Peso según el rating del disco anchor
-   - **`recency_weight`**: `1 / log2(días_desde_calificación + 1)` - Peso por recencia
-   - **`pair_count`**: Frecuencia de co-ocurrencia (más usuarios = más confianza)
-   - **`lift`**: Factor de sorpresa (0.7 base + 0.3 * lift)
-   - **`jaccard`**: Similitud de usuarios (0.5 base + 0.5 * jaccard)
-
-4. **Acumula scores:** Si un disco aparece relacionado con varios anchors, suma los scores
-
-5. **Ordena y filtra:** Devuelve los top N excluyendo los ya vistos
-
-### Ejemplo Práctico
-
-**Usuario calificó:**
-- Disco A: rating 4.5, hace 10 días
-- Disco B: rating 3.5, hace 5 días
-
-**En `release_pairs`:**
-- (A, X): pair_count=50, lift=2.0, jaccard=0.3
-- (B, X): pair_count=30, lift=1.5, jaccard=0.2
-
-**Cálculo del score para X:**
-```
-Desde A: (4.5/5) * recency_A * 50 * (0.7 + 0.3*2.0) * (0.5 + 0.5*0.3)
-        = 0.9 * 0.85 * 50 * 1.3 * 0.65 ≈ 32.3
-
-Desde B: (3.5/5) * recency_B * 30 * (0.7 + 0.3*1.5) * (0.5 + 0.5*0.2)
-        = 0.7 * 0.92 * 30 * 1.15 * 0.6 ≈ 13.3
-
-Score total para X = 32.3 + 13.3 = 45.6
-```
-
-### Ventajas
-
-- ✅ Funciona bien con pocas señales (hasta 8 calificaciones)
-- ✅ Encuentra conexiones directas entre discos
-- ✅ Considera rating y recencia del usuario
-- ✅ Usa métricas estadísticas (lift, jaccard) para filtrar ruido
-
-### Limitaciones
-
-- ⚠️ Depende de la calidad de `release_pairs` (requiere reconstrucción periódica)
-- ⚠️ Con muchas señales puede volverse ruidoso
-- ⚠️ Menos generalizable que el sistema basado en contenido
-
-### Configuración
-
-- **Umbral de activación:** `max_pairs_signals = 8` (usa co-ocurrencia con ≤8 calificaciones)
-- **Mínimo de pares:** `min_pair_count = 3` (en construcción de tabla)
-- **Mínimo de rating:** `min_rating = 3.0` (para considerar positiva una interacción)
 
 ---
 
@@ -432,11 +330,11 @@ El endpoint detecta automáticamente el nivel del usuario y actualiza los sistem
 
 ### Ventajas del Sistema Unificado
 
-- ✅ **UX simplificada**: Un solo botón en lugar de dos técnicos
-- ✅ **Progresión clara**: El usuario ve su progreso hacia el siguiente nivel
-- ✅ **Mejor calidad**: La combinación en nivel 2 aprovecha lo mejor de ambos sistemas
-- ✅ **Consenso**: El bonus de consenso prioriza recomendaciones más confiables
-- ✅ **Fallbacks robustos**: Funciona incluso si un sistema falla
+- **UX simplificada**: Un solo botón en lugar de dos técnicos
+- **Progresión clara**: El usuario ve su progreso hacia el siguiente nivel
+- **Mejor calidad**: La combinación en nivel 2 aprovecha lo mejor de ambos sistemas
+- **Consenso**: El bonus de consenso prioriza recomendaciones más confiables
+- **Fallbacks robustos**: Funciona incluso si un sistema falla
 
 ### Configuración
 
@@ -524,18 +422,18 @@ Sistema basado en **Non-negative Matrix Factorization (NMF)** que aprende patron
 
 ### Ventajas
 
-- ✅ **Captura patrones complejos**: Los factores latentes descubren relaciones no obvias
-- ✅ **Muy eficiente en memoria**: Matrices sparse usan ~50-100 MB vs ~17 GB densas
-- ✅ **Escalable**: Inferencia rápida (<100ms) incluso con muchos releases
-- ✅ **Mejor para usuarios activos**: Funciona mejor con más datos del usuario
-- ✅ **Diversidad**: Puede descubrir releases fuera de géneros/artistas obvios
+- **Captura patrones complejos**: Los factores latentes descubren relaciones no obvias
+- **Muy eficiente en memoria**: Matrices sparse usan ~50-100 MB vs ~17 GB densas
+- **Escalable**: Inferencia rápida (<100ms) incluso con muchos releases
+- **Mejor para usuarios activos**: Funciona mejor con más datos del usuario
+- **Diversidad**: Puede descubrir releases fuera de géneros/artistas obvios
 
 ### Limitaciones
 
-- ⚠️ **Requiere embeddings precomputados**: Deben generarse offline periódicamente
-- ⚠️ **Cold start**: No funciona para usuarios nuevos (<20 calificaciones)
-- ⚠️ **Depende de calidad de datos**: Requiere suficientes interacciones positivas
-- ⚠️ **Menos interpretable**: Los factores latentes no tienen significado directo
+- **Requiere embeddings precomputados**: Deben generarse offline periódicamente
+- **Cold start**: No funciona para usuarios nuevos (<20 calificaciones)
+- **Depende de calidad de datos**: Requiere suficientes interacciones positivas
+- **Menos interpretable**: Los factores latentes no tienen significado directo
 
 ### Actualización de Embeddings
 
@@ -546,10 +444,10 @@ Los embeddings pueden actualizarse de dos formas:
 Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar su embedding individual desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"** junto a su nombre de usuario. El sistema detecta automáticamente el nivel y actualiza NMF (nivel 1) o NMF + Two Towers (nivel 2).
 
 **Ventajas:**
-- ✅ Actualización inmediata cuando el usuario califica nuevos discos
-- ✅ Solo recalcula el embedding del usuario (muy rápido, <1 segundo)
-- ✅ No requiere acceso al servidor ni scripts offline
-- ✅ Disponible directamente desde la interfaz web
+- Actualización inmediata cuando el usuario califica nuevos discos
+- Solo recalcula el embedding del usuario (muy rápido, <1 segundo)
+- No requiere acceso al servidor ni scripts offline
+- Disponible directamente desde la interfaz web
 
 **Cómo funciona:**
 - El sistema calcula un promedio ponderado de los embeddings de releases que el usuario calificó positivamente
@@ -688,21 +586,21 @@ El modelo consiste en dos redes neuronales separadas:
 
 ### Ventajas
 
-- ✅ **Mejor uso de features**: Aprovecha características de usuario e items que NMF no usa
-- ✅ **Cold start mejorado**: Puede hacer recomendaciones usando features estáticas sin historial extenso
-- ✅ **Patrones no lineales**: Las redes neuronales pueden capturar relaciones complejas
-- ✅ **Flexibilidad**: Fácil agregar nuevas features sin cambiar la arquitectura
-- ✅ **Escalable**: Inferencia rápida con embeddings precomputados
-- ✅ **Complementario**: Puede coexistir con NMF y usarse según el caso
+- **Mejor uso de features**: Aprovecha características de usuario e items que NMF no usa
+- **Cold start mejorado**: Puede hacer recomendaciones usando features estáticas sin historial extenso
+- **Patrones no lineales**: Las redes neuronales pueden capturar relaciones complejas
+- **Flexibilidad**: Fácil agregar nuevas features sin cambiar la arquitectura
+- **Escalable**: Inferencia rápida con embeddings precomputados
+- **Complementario**: Puede coexistir con NMF y usarse según el caso
 
 ### Limitaciones
 
-- ⚠️ **Requiere embeddings precomputados**: Deben generarse offline periódicamente
-- ⚠️ **Tiempo de entrenamiento**: Más lento que NMF (minutos vs segundos)
-- ⚠️ **Hiperparámetros**: Requiere tuning de arquitectura, learning rate, etc.
-- ⚠️ **Dependencias**: Requiere TensorFlow/Keras
-- ⚠️ **Memoria**: Modelo más pesado que NMF (aunque embeddings son similares)
-- ⚠️ **Menos interpretable**: Los embeddings no tienen significado directo
+- **Requiere embeddings precomputados**: Deben generarse offline periódicamente
+- **Tiempo de entrenamiento**: Más lento que NMF (minutos vs segundos)
+- **Hiperparámetros**: Requiere tuning de arquitectura, learning rate, etc.
+- **Dependencias**: Requiere TensorFlow/Keras
+- **Memoria**: Modelo más pesado que NMF (aunque embeddings son similares)
+- **Menos interpretable**: Los embeddings no tienen significado directo
 
 ### Entrenamiento del Modelo
 
@@ -755,10 +653,10 @@ Los embeddings pueden actualizarse de dos formas:
 Los usuarios con ≥20 calificaciones positivas pueden generar o actualizar sus embeddings desde la interfaz web usando el botón unificado **"Recomendaciones avanzadas"** junto a su nombre de usuario. El sistema detecta automáticamente el nivel y actualiza los sistemas correspondientes (NMF en nivel 1, NMF + Two Towers en nivel 2).
 
 **Ventajas:**
-- ✅ Actualización inmediata cuando el usuario califica nuevos discos
-- ✅ Intenta usar el modelo entrenado si está disponible, sino usa aproximación por promedio ponderado
-- ✅ No requiere acceso al servidor ni scripts offline
-- ✅ Disponible directamente desde la interfaz web
+- Actualización inmediata cuando el usuario califica nuevos discos
+- Intenta usar el modelo entrenado si está disponible, sino usa aproximación por promedio ponderado
+- No requiere acceso al servidor ni scripts offline
+- Disponible directamente desde la interfaz web
 
 **Cómo funciona:**
 - Si el modelo entrenado está disponible, genera el embedding usando las características del usuario
@@ -797,6 +695,120 @@ python -m offline_recommender.build_two_towers \
 | **Inferencia** | Muy rápida | Rápida |
 | **Patrones** | Lineales | No lineales |
 | **Interpretabilidad** | Baja | Baja |
+
+### Base de datos Lite (`sputnik_lite.db`)
+
+En despliegues livianos (ej. PythonAnywhere) se usa la base `sputnik_lite.db`, que reutiliza **los embeddings de releases generados con la base completa** para mantener la calidad sin necesidad de reentrenar la torre de usuarios.
+
+- **Fuente de embeddings:** la tabla `release_embeddings_dl` de la base lite contiene ~6 000 items copiados desde la ejecución completa de `offline_recommender/build_two_towers.py` sobre `data/sputnik.db`.
+- **Actualización recomendada:**
+  1. Ejecutar el entrenamiento completo en la base grande para refrescar los embeddings de items.
+  2. Correr `scripts/build_lite_db.py --force`, que copia los releases y sus embeddings hacia `sputnik_lite.db`.
+  3. Los usuarios generan su embedding al presionar el botón **“Recomendaciones avanzadas”**, lo que dispara `app/two_towers_update.py`.
+- **Método usado en producción:** `update_user_embedding()` calcula un promedio ponderado de los embeddings de los releases que el usuario calificó positivamente (`rating ≥ 3`). El peso es `max(0.1, rating / 5.0)`; luego se normaliza con L2 y se persiste en `user_embeddings_dl`. Este enfoque funciona para cualquier usuario sin depender de un modelo adicional.
+- **Torre de usuarios lite:** existe un modelo experimental (no versionado en git) en `models/user_tower_sputnik_lite.keras`, pero solo cubre ~293 artistas y ~500 releases, por lo que quedó descartado para producción. Puede usarse para pruebas locales, aunque no se mantiene activamente.
+
+---
+
+## Co-ocurrencia (release_pairs)
+
+**Función:** `recommend_from_pairs(user_id, limit=9)`
+
+Sistema basado en la frecuencia con que los discos aparecen juntos en las colecciones de los usuarios. Ideal para usuarios con pocas calificaciones (≤8).
+
+### Construcción de la Tabla `release_pairs` (Offline)
+
+**Script:** `offline_recommender/build_release_pairs.py`
+
+#### Proceso:
+
+1. **Análisis de interacciones positivas:**
+   - Filtra todas las interacciones con `rating >= 3.0` (configurable)
+   - Crea una tabla temporal con `(usuario, disco)` para calificaciones positivas
+
+2. **Cálculo de co-ocurrencias:**
+   - Para cada par de discos (A, B), cuenta cuántos usuarios calificaron ambos
+   - Procesa en lotes para eficiencia (batch_size=250 por defecto)
+
+3. **Cálculo de métricas:**
+   - **`pair_count`**: Cantidad de usuarios que calificaron ambos discos
+   - **`jaccard`**: Similitud entre conjuntos de usuarios
+     ```
+     jaccard = pair_count / (usuarios_A + usuarios_B - pair_count)
+     ```
+   - **`lift`**: Medida de asociación estadística
+     ```
+     lift = pair_count / (usuarios_A * usuarios_B)
+     ```
+
+4. **Filtrado:**
+   - Solo guarda pares con `pair_count >= 3` (configurable con `--min-pair-count`)
+   - La tabla es bidireccional: si existe (A, B), también existe (B, A)
+
+### Recomendación en Tiempo Real
+
+#### Algoritmo `_score_pairs()`:
+
+1. **Obtiene anchors:** Los discos que el usuario calificó positivamente
+
+2. **Busca relaciones:** Encuentra todos los discos relacionados en `release_pairs`
+
+3. **Calcula score para cada candidato:**
+   ```python
+   score = rating_weight * recency_weight * pair_count *
+           (0.7 + 0.3 * lift) * (0.5 + 0.5 * jaccard)
+   ```
+
+   **Componentes:**
+   - **`rating_weight`**: `max(0.1, rating / 5.0)` - Peso según el rating del disco anchor
+   - **`recency_weight`**: `1 / log2(días_desde_calificación + 1)` - Peso por recencia
+   - **`pair_count`**: Frecuencia de co-ocurrencia (más usuarios = más confianza)
+   - **`lift`**: Factor de sorpresa (0.7 base + 0.3 * lift)
+   - **`jaccard`**: Similitud de usuarios (0.5 base + 0.5 * jaccard)
+
+4. **Acumula scores:** Si un disco aparece relacionado con varios anchors, suma los scores
+
+5. **Ordena y filtra:** Devuelve los top N excluyendo los ya vistos
+
+### Ejemplo Práctico
+
+**Usuario calificó:**
+- Disco A: rating 4.5, hace 10 días
+- Disco B: rating 3.5, hace 5 días
+
+**En `release_pairs`:**
+- (A, X): pair_count=50, lift=2.0, jaccard=0.3
+- (B, X): pair_count=30, lift=1.5, jaccard=0.2
+
+**Cálculo del score para X:**
+```
+Desde A: (4.5/5) * recency_A * 50 * (0.7 + 0.3*2.0) * (0.5 + 0.5*0.3)
+        = 0.9 * 0.85 * 50 * 1.3 * 0.65 ≈ 32.3
+
+Desde B: (3.5/5) * recency_B * 30 * (0.7 + 0.3*1.5) * (0.5 + 0.5*0.2)
+        = 0.7 * 0.92 * 30 * 1.15 * 0.6 ≈ 13.3
+
+Score total para X = 32.3 + 13.3 = 45.6
+```
+
+### Ventajas
+
+- Funciona bien con pocas señales
+- Encuentra conexiones directas entre discos
+- Considera rating y recencia del usuario
+- Usa métricas estadísticas (lift, jaccard) para filtrar ruido
+
+### Limitaciones
+
+- Depende de la calidad de `release_pairs` (requiere reconstrucción periódica)
+- Con muchas señales puede volverse ruidoso
+- Menos generalizable que el sistema basado en contenido
+
+### Configuración
+
+- **Umbral de activación:** `max_pairs_signals = 8` (usa co-ocurrencia con ≤8 calificaciones)
+- **Mínimo de pares:** `min_pair_count = 3` (en construcción de tabla)
+- **Mínimo de rating:** `min_rating = 3.0` (para considerar positiva una interacción)
 
 ---
 
@@ -894,16 +906,16 @@ score = (peso_géneros * genre_weight) +
 
 ### Ventajas
 
-- ✅ Generaliza bien con más datos del usuario
-- ✅ No depende de co-ocurrencias específicas
-- ✅ Considera múltiples factores (géneros, artistas, popularidad)
-- ✅ Funciona mejor con usuarios con historial más extenso
+- Generaliza bien con más datos del usuario
+- No depende de co-ocurrencias específicas
+- Considera múltiples factores (géneros, artistas, popularidad)
+- Funciona mejor con usuarios con historial más extenso
 
 ### Limitaciones
 
-- ⚠️ Necesita suficientes calificaciones para construir un perfil robusto
-- ⚠️ Puede ser sesgado si el usuario solo califica un género muy específico
-- ⚠️ Menos personalizado que co-ocurrencia para usuarios nuevos
+- Necesita suficientes calificaciones para construir un perfil robusto
+- Puede ser sesgado si el usuario solo califica un género muy específico
+- Menos personalizado que co-ocurrencia para usuarios nuevos
 
 ---
 
@@ -944,15 +956,15 @@ Estrategia de fallback que recomienda discos populares que el usuario aún no ha
 
 ### Ventajas
 
-- ✅ Simple y rápido
-- ✅ Funciona para usuarios nuevos
-- ✅ Asegura que siempre haya recomendaciones disponibles
+- Simple y rápido
+- Funciona para usuarios nuevos
+- Asegura que siempre haya recomendaciones disponibles
 
 ### Limitaciones
 
-- ⚠️ No es personalizado
-- ⚠️ Puede recomendar discos muy conocidos que el usuario ya conoce
-- ⚠️ No considera preferencias del usuario
+- No es personalizado
+- Puede recomendar discos muy conocidos que el usuario ya conoce
+- No considera preferencias del usuario
 
 ---
 
@@ -987,15 +999,15 @@ Estrategia que selecciona discos aleatorios del catálogo para fomentar la explo
 
 ### Ventajas
 
-- ✅ Fomenta la exploración
-- ✅ Descubre discos fuera de la zona habitual del usuario
-- ✅ Aumenta la diversidad del catálogo recomendado
+- Fomenta la exploración
+- Descubre discos fuera de la zona habitual del usuario
+- Aumenta la diversidad del catálogo recomendado
 
 ### Limitaciones
 
-- ⚠️ No considera preferencias del usuario
-- ⚠️ Puede recomendar discos de baja calidad
-- ⚠️ Menor relevancia esperada
+- No considera preferencias del usuario
+- Puede recomendar discos de baja calidad
+- Menor relevancia esperada
 
 ---
 
@@ -1030,14 +1042,14 @@ Sistema especializado para recomendar discos relacionados con un disco específi
 
 ### Ventajas
 
-- ✅ Múltiples fuentes de información
-- ✅ Especializado para contexto específico
-- ✅ Considera relaciones directas e indirectas
+- Múltiples fuentes de información
+- Especializado para contexto específico
+- Considera relaciones directas e indirectas
 
 ### Limitaciones
 
-- ⚠️ Depende de la calidad de las tablas de relaciones
-- ⚠️ Puede ser limitado si el disco tiene pocas relaciones
+- Depende de la calidad de las tablas de relaciones
+- Puede ser limitado si el disco tiene pocas relaciones
 
 ---
 
@@ -1123,8 +1135,8 @@ python -m offline_recommender.evaluate_recommender \
 - **`max_pairs_signals`**: `8` - Umbral para cambiar de co-ocurrencia a contenido
 - **`min_advanced_level_1_signals`**: `20` - Umbral para activar recomendaciones avanzadas nivel 1 (NMF)
 - **`min_advanced_level_2_signals`**: `30` - Umbral para activar recomendaciones avanzadas nivel 2 (NMF + Two Towers)
-- **`advanced_nmf_weight`**: `0.6` - Peso de NMF en combinación nivel 2
-- **`advanced_two_towers_weight`**: `0.4` - Peso de Two Towers en combinación nivel 2
+- **`advanced_nmf_weight`**: `0.4` - Peso de NMF en combinación nivel 2
+- **`advanced_two_towers_weight`**: `0.6` - Peso de Two Towers en combinación nivel 2
 - **`advanced_consensus_bonus`**: `0.2` - Bonus para candidatos que aparecen en ambos sistemas
 - **`min_two_towers_signals`**: `10` - Umbral legacy (mantenido para compatibilidad)
 - **`min_nmf_signals`**: `20` - Umbral legacy (mantenido para compatibilidad)
@@ -1161,7 +1173,7 @@ python -m offline_recommender.evaluate_recommender \
 
 ### Filtrado Colaborativo Basado en Usuarios (User-Based CF)
 
-**Estado**: No implementado - Consideración futura
+**Estado**: No implementado debido al aumento de peso de la db y no aportaba mas señal que item based-CF - Consideración futura
 
 El sistema actual utiliza filtrado colaborativo basado en items (item-based CF) a través de la tabla `release_pairs`. Una posible extensión sería implementar filtrado colaborativo basado en usuarios (user-based CF).
 
@@ -1224,9 +1236,6 @@ User-based CF sería beneficioso si:
 - Construcción de pares: `offline_recommender/build_release_pairs.py`
 - Construcción de embeddings NMF: `offline_recommender/build_nmf_embeddings.py`
 - Construcción de embeddings Two Towers: `offline_recommender/build_two_towers.py`
-- Evaluación: `offline_recommender/evaluate_recommender.py` (evalúa max_ensemble y rrf_ensemble)
+- Evaluación: `offline_recommender/evaluate_recommender.py`
 - Métricas: `app/metrics.py`
-- Análisis NMF: `docs/analisis-svd-nmf.md`
-- Guía NMF: `docs/guia-nmf.md`
-- Análisis de potencial user-based CF: `offline_recommender/analyze_user_cf_potential.py`
 - Análisis de evaluaciones: `notebooks/analisis_evaluacion_recomendaciones.ipynb`

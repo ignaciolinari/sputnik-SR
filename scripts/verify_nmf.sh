@@ -85,7 +85,7 @@ if [ "$USER_COUNT" -gt 0 ] && [ "$RELEASE_COUNT" -gt 0 ]; then
     echo "Para probar:"
     echo "  python -c \"from app import recommender; print(recommender.recommend_nmf('tu_usuario_id', 9))\""
 else
-    echo "⚠ NMF necesita ser configurado. Sigue los pasos en docs/guia-nmf.md"
+    echo "⚠ NMF necesita ser configurado. Sigue los pasos en docs/estrategias-recomendacion.md (sección NMF)"
     echo ""
     echo "Próximo paso:"
     echo "  python -m offline_recommender.build_nmf_embeddings --verbose"

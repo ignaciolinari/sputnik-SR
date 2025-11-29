@@ -368,8 +368,8 @@ El sistema de recomendaciones avanzadas requiere embeddings de NMF y Two Towers.
   - `max_pairs_signals`: hasta cuántos ratings positivos disparan la estrategia de pares (default: 8).
   - `min_advanced_level_1_signals`: mínimo de ratings positivos para activar recomendaciones avanzadas nivel 1 (default: 20).
   - `min_advanced_level_2_signals`: mínimo de ratings positivos para activar recomendaciones avanzadas nivel 2 (default: 30).
-  - `advanced_nmf_weight`: peso de NMF en combinación nivel 2 (default: 0.6).
-  - `advanced_two_towers_weight`: peso de Two Towers en combinación nivel 2 (default: 0.4).
+  - `advanced_nmf_weight`: peso de NMF en combinación nivel 2 (default: 0.4).
+  - `advanced_two_towers_weight`: peso de Two Towers en combinación nivel 2 (default: 0.6).
   - `advanced_consensus_bonus`: bonus para candidatos que aparecen en ambos sistemas (default: 0.2).
   - `genre_weight` / `artist_weight` / `popularity_prior`: balance de cada componente en el score content-based.
   - `recency_log_base`: logaritmo usado para atenuar la recencia.
