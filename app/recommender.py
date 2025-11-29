@@ -2636,7 +2636,7 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
         "id": "advanced",
         "name": "Recomendaciones Avanzadas",
         "description": (
-            "Genera embeddings personalizados que alimentan RRF y Two Towers. "
+            "Genera embeddings personalizados basados en NMF y Two Towers. "
             "Se actualiza a pedido del usuario."
         ),
         "tooltip_detail": {
@@ -2644,9 +2644,9 @@ _ACTIVE_RECOMMENDER_SYSTEMS: List[dict] = [
                 "Factorización de matrices que descubre patrones latentes " "en tus preferencias."
             ),
             "two_towers": (
-                "Red neuronal que aprende representaciones profundas de usuarios y discos. "
-                "Usa pesos dinámicos que favorecen Two Towers progresivamente."
+                "Red neuronal que aprende representaciones profundas de usuarios y discos."
             ),
+            "dynamic_weights": ("Usa pesos dinámicos que favorecen Two Towers progresivamente."),
         },
     },
     {
