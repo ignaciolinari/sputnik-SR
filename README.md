@@ -32,6 +32,10 @@ Motor híbrido que combina múltiples estrategias para generar recomendaciones p
 
 [Documentación detallada de estrategias](docs/estrategias-recomendacion.md)
 
+### Evaluación offline y hallazgos principales
+
+[Notebook de Resultados](notebooks/analisis_evaluacion_recomendaciones.ipynb)
+
 ## Inicio Rápido
 
 ### Instalación
@@ -79,17 +83,17 @@ python -m app.app
 
 ```
 sputnik-SR/
-├── scraper/          # Parsing de HTML y cliente HTTP
-├── crawler/          # Orquestadores de crawling
-├── app/              # Aplicación Flask y motor de recomendación
+├── scraper/              # Parsing de HTML y cliente HTTP
+├── crawler/              # Orquestadores de crawling
+├── app/                  # Aplicación Flask y motor de recomendación
 ├── offline_recommender/  # Scripts de construcción y evaluación
-├── maintenance/      # Scripts de mantenimiento de la DB
-├── data/             # Esquema SQL y bases de datos
-├── models/           # Modelos entrenados y vocabularios
-├── scripts/          # Utilidades bash
-├── tests/            # Suite de pruebas
-├── notebooks/        # Análisis exploratorios y de resultados finales
-└── docs/             # Documentación detallada
+├── maintenance/          # Scripts de mantenimiento de la DB
+├── data/                 # Esquema SQL y bases de datos
+├── models/               # Modelos entrenados y vocabularios
+├── scripts/              # Utilidades bash
+├── tests/                # Suite de pruebas
+├── notebooks/            # Análisis exploratorios y de resultados finales
+└── docs/                 # Documentación detallada
 ```
 
 ## Documentación
@@ -98,7 +102,6 @@ sputnik-SR/
 |-----------|-------------|
 | [Extracción de Datos](docs/extraccion-datos.md) | Scraping, crawling, flujo de ingestión, monitoreo |
 | [Estrategias de Recomendación](docs/estrategias-recomendacion.md) | Algoritmos, métricas, configuración, evaluación |
-| [Optimización NMF](offline_recommender/optimizacion_nmf.md) | Optimización bayesiana de hiperparámetros |
 | [Mantenimiento](maintenance/README.md) | Scripts de salud y optimización de la DB |
 
 ## Desarrollo
@@ -114,14 +117,6 @@ ruff check .
 pre-commit install
 pre-commit run --all-files
 ```
-
-## Variables de Entorno
-
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `SPUTNIK_DB` | Ruta a la base SQLite | `data/sputnik.db` |
-| `DB_PATH` | Ruta alternativa (scripts bash) | `data/sputnik.db` |
-| `LOG_LEVEL` | Nivel de logging | `INFO` |
 
 ## Licencia
 
