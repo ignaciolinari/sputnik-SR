@@ -370,9 +370,9 @@ releases_enriched  # Releases con recomendaciones y tracklist en JSON
        │                   │                   │
        │                   │                   │
        ▼                   ▼                   ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│artist_genres│     │release_genres│    │    users    │
-└─────────────┘     └─────────────┘     └─────────────┘
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│artist_genres│     │release_genres│     │    users    │
+└─────────────┘     └──────────────┘     └─────────────┘
 ```
 
 ---
