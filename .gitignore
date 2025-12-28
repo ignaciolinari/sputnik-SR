@@ -14,6 +14,7 @@ logs/
 .vscode/
 tmp/
 output/
+offline_recommender/output/
 notes.md
 vintage/
 *.lock
@@ -21,3 +22,5 @@ vintage/
 .experiment_two_towers.lock
 checkpoints/
 results/
+models/**/*.keras
+models/**/two_towers_*_user_index.json
